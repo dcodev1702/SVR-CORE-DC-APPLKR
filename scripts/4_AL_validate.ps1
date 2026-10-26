@@ -1,10 +1,56 @@
-# Step 4 - run from the management computer (Windows PowerShell 5.1 or PowerShell 7). Read-only validation of the AppLocker deployment.
-# Per OU: both GPOs exist, exactly one link enabled, the rules inside the active GPO have the expected modes.
-# Per server (target OUs, or -ComputerName): Application Identity running + Automatic, effective modes of the collections this baseline
-# manages (Exe, Msi, Script, Appx; other collections such as the MECM managed installer's are reported), ExtraAllowedPaths items a
-# non-admin can change are not allowed by the policy, sample rule decisions (Windows tools, MECM client, Nessus, C:\Admin), core DC
-# services, and AppLocker event counts. Results: console + Logs\4_AL_validate-<ts>.csv.
-# -Mode Auto (default) expects what the enabled link says; Audit / Enforce / Off assert a specific mode. Exit code 1 on a failure.
+<#
+.SYNOPSIS
+    Step 6 (and after every change) - read-only validation of the AppLocker deployment: GPOs, links, rules, service, effective policy.
+
+.DESCRIPTION
+    Run from the management computer. Nothing is changed. Per target OU it checks that both GPOs exist with matching AD and SYSVOL
+    versions, that each carries Application Identity = Automatic and the rules in the expected modes, and that exactly one link is
+    enabled. Per server (the target OUs, or -ComputerName), over WinRM, it checks: Application Identity running and Automatic; the
+    effective modes of the collections this baseline manages (Exe, Msi, Script, Appx - other collections such as the MECM managed
+    installer's are reported, not judged); that an ExtraAllowedPaths item a non-admin can change is NOT allowed by the policy (that
+    would be a bypass); sample rule decisions (Windows tools, the MECM client, Nessus, a file from C:\Admin, for Everyone and for
+    Administrators); the core domain controller services; and the AppLocker event counts of the last -EventHours hours.
+    -Mode Auto (default) expects what the enabled link says; Audit, Enforce or Off asserts that mode.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER Mode
+    Auto (default: expect what the links say), or assert Audit, Enforce or Off.
+
+.PARAMETER TargetOU
+    Distinguished names of the OUs to check. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
+
+.PARAMETER ComputerName
+    Servers to check. Default: every Windows Server computer in the target OUs.
+
+.PARAMETER EventHours
+    Window of the AppLocker event counts shown at the end, in hours (1-8760). Default: 24.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: a Status / Check / Detail table and "Validation: PASSED" or "FAILED". The same rows as CSV in
+    Logs\4_AL_validate-<timestamp>.csv; transcript in Logs\4_AL_validate-<timestamp>.log. Exit code 1 on any FAIL.
+
+.EXAMPLE
+    .\4_AL_validate.ps1
+    Validates against whatever mode the links say.
+
+.EXAMPLE
+    .\4_AL_validate.ps1 -Mode Enforce -EventHours 168
+    Asserts Enforce and summarises the events of the last week.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules and the AppLocker module; WinRM.
+    Changes  : nothing (read-only).
+    README   : section 7, step 6; appendix D (troubleshooting).
+#>
 param(
     [string]$SettingsFile,
     [ValidateSet('Auto', 'Audit', 'Enforce', 'Off')][string]$Mode = 'Auto',
@@ -66,6 +112,7 @@ try {
     Import-ALModule GroupPolicy; Import-ALModule ActiveDirectory; Import-ALModule AppLocker
     $Domain = Get-ALDomainInfo
     $Ous = Resolve-ALTargetOUs $Cfg $Domain
+    # ---- per OU: both GPOs (AD/SYSVOL versions, System Services, rule modes) and which link is enabled
     $Audit = Get-GPO -Name $Cfg.AuditGpoName -Server $Domain.PDC -ErrorAction SilentlyContinue
     $Enforce = Get-GPO -Name $Cfg.EnforceGpoName -Server $Domain.PDC -ErrorAction SilentlyContinue
     $OurIds = @{}   # rule IDs of both GPOs: in Off mode none of them may still be effective
@@ -99,6 +146,7 @@ try {
     elseif ($Mode -ne 'Auto' -and ($Active | Where-Object { $_ -ne $Mode })) { Add-ALResult $R 'FAIL' 'Mode' "expected $Mode but the links say $($Active -join ', ')" }
     else { Add-ALResult $R 'INFO' 'Mode asserted' "$Expect$(if ($Expect -eq 'Enforce') { ' - WN25-00-000080 / V-277992 met' } elseif ($Expect) { ' - WN25-00-000080 / V-277992 NOT met until Enforce' })" }
 
+    # ---- per server, over WinRM: service, effective policy, sample decisions, DC services, extra paths, event counts
     if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
     if (-not @($ComputerName).Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
     foreach ($C in $ComputerName) {

@@ -1,4 +1,44 @@
-# Shared helpers for the AppLocker scripts (dot-sourced by 0_ to 5_). Windows PowerShell 5.1 and PowerShell 7. ASCII-only.
+<#
+.SYNOPSIS
+    Shared helpers for the AppLocker scripts. Dot-sourced by every step script; not run on its own.
+
+.DESCRIPTION
+    One library, loaded with  . "$PSScriptRoot\AL-Common.ps1"  at the top of each step script. It holds:
+      - settings: New-ALDefaultSettings, Initialize-AL (settings file + overrides, folders, transcript), Assert-ALSettings (refuses
+        values that would widen the policy or damage a system folder), Set-ALSettingsArray (writes one array setting back in place)
+      - the confirmation gate: Confirm-ALChange (yellow Y/N, -NoConfirm, never hangs in a non-interactive session), Test-ALInteractive
+      - results and evidence: New-ALResults, Add-ALResult, Write-ALResults (table + CSV + PASSED / FAILED line), Stop-ALTranscript
+      - the domain and GPOs: Get-ALDomainInfo, Resolve-ALTargetOUs, Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
+        Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
+      - the build: Get-ALBuildFolder, New-ALDeployXml, Get-ALPolicySummary, Add-ALPathExceptions, Get-ALRuleExceptions,
+        Get-ALExtraPathPlan, Get-ALExpectedMode, Get-ALPolicyMismatch, Get-ALManagedCollections
+      - permissions: $ALWritableCheck (runs on a server: who can change an ExtraAllowedPaths / SecureFolders item),
+        Invoke-ALWritableCheck, Test-ALPathUnder, Test-ALCovered, ConvertTo-ALComparablePath
+      - KnownAdmins: Test-ALNeverAdmin, Test-ALBuiltInAdminSid, Split-ALCanonicalName, ConvertTo-ALLdapFilterValue,
+        Get-ALKnownAdminEntry, ConvertTo-ALArrayLiteral
+      - the toolkit: Import-ALModule, Test-ALModule (both PowerShell editions), Test-ALAccessChk, Get-ALPeMachine, Get-ALSha256
+    Every function is documented where it is defined. The logic here is covered by tests\Test-AL.ps1 (no network, no domain).
+
+.INPUTS
+    None. The file is dot-sourced; it takes no parameters.
+
+.OUTPUTS
+    None. Dot-sourcing defines the functions and the $ALWritableCheck script block in the caller's scope.
+
+.EXAMPLE
+    . "$PSScriptRoot\AL-Common.ps1"
+    $Cfg = Initialize-AL -ScriptName '4_AL_validate' -SettingsFile $SettingsFile
+    How every step script starts: load the helpers, read and check the settings, start the transcript.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7. ASCII-only source. Modules are loaded on demand by Import-ALModule.
+    Changes  : nothing by itself; the step scripts decide what is changed.
+#>
+
 
 # Loads a Windows module in either edition. PowerShell 7: AppLocker runs in the Windows PowerShell compatibility session (so
 # Set-AppLockerPolicy behaves exactly as in 5.1); GroupPolicy and ActiveDirectory load with -SkipEditionCheck.

@@ -1,9 +1,53 @@
-# Step 0 (second script) - run from the management computer (Windows PowerShell 5.1 or PowerShell 7) as a Domain Admin / GPO creator.
-# Read-only. Checks everything the later steps depend on and reports OK / WARN / FAIL / INFO (console + Logs\0_AL_pre-flight-<ts>.csv):
-#   management computer (modules), domain + GPO rights, target OUs and their servers, toolkit, the two GPOs, and - on the reference
-#   server and every server in the target OUs - WinRM, language mode, script execution policy, any existing AppLocker policy,
-#   Configuration Manager (MECM client / site server), Tenable Nessus, services and scheduled tasks that run code from outside the
-#   folders the baseline allows, and whether every ExtraAllowedPaths entry (C:\Admin ...) can be changed by administrators only.
+<#
+.SYNOPSIS
+    Step 2 - read-only pre-flight: checks everything the later steps depend on and reports OK / WARN / FAIL / INFO.
+
+.DESCRIPTION
+    Run from the management computer as a Domain Admin (or an account that can read GPOs and use WinRM on the servers). Nothing is
+    changed. It checks:
+      - the management computer: PowerShell edition, the GroupPolicy, ActiveDirectory and AppLocker modules
+      - the domain: PDC emulator, GPO read access, SYSVOL, the target OUs and the servers in them, the reference server
+      - the toolkit: AaronLocker, AccessChk (signature, 64-bit, pinned hash), the Customizations overlay, the KnownAdmins setting
+      - the two GPOs: do they exist, which links are enabled
+      - on the reference server and every server in the target OUs, over WinRM: OS, language mode, execution policy, the AppLocker
+        module and the Application Identity service, any AppLocker policy already effective (local or GPO), the Configuration Manager
+        client or site server, SQL Server, Tenable Nessus, services and scheduled tasks that run code from outside the folders the
+        baseline allows, and whether every ExtraAllowedPaths entry (C:\Admin ...) can be changed by administrators only
+    A FAIL must be fixed before the build. A WARN says what the build will do about it (README, section 7, step 2).
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER ReferenceServer
+    FQDN of the server the baseline will be built on. Overrides the ReferenceServer setting for this run.
+
+.PARAMETER TargetOU
+    Distinguished names of the OUs whose servers are in scope. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: a Status / Check / Detail table and "Pre-flight: PASSED" or "FAILED". The same rows as CSV in
+    Logs\0_AL_pre-flight-<timestamp>.csv; transcript in Logs\0_AL_pre-flight-<timestamp>.log. Exit code 1 on any FAIL.
+
+.EXAMPLE
+    .\0_AL_pre-flight.ps1
+    Checks the reference server and every server in the target OUs named in the settings.
+
+.EXAMPLE
+    .\0_AL_pre-flight.ps1 -ReferenceServer dc01.contoso.com -TargetOU 'OU=Domain Controllers,DC=contoso,DC=com'
+    The same, with the scope given on the command line.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules; WinRM to the servers.
+    Changes  : nothing (read-only).
+    README   : section 7, step 2 (what each WARN and FAIL means and what to do).
+#>
 param(
     [string]$SettingsFile,
     [string]$ReferenceServer,
@@ -69,6 +113,7 @@ $Probe = {
 }
 
 try {
+    # ---- management computer and domain
     Add-ALResult $R 'INFO' 'Settings' "$($Cfg.SettingsFile) (profile '$($Cfg.Profile)')"
     Add-ALResult $R 'OK' 'PowerShell' "PowerShell $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition) on $env:COMPUTERNAME"
     foreach ($M in 'GroupPolicy', 'ActiveDirectory', 'AppLocker') {
@@ -84,6 +129,7 @@ try {
         if (Test-Path -LiteralPath $Sysvol) { Add-ALResult $R 'OK' 'SYSVOL' "$Sysvol reachable" } else { Add-ALResult $R 'FAIL' 'SYSVOL' "$Sysvol not reachable" }
     } catch { Add-ALResult $R 'FAIL' 'SYSVOL' $_.Exception.Message }
 
+    # ---- scope: target OUs, the servers in them, the reference server
     $Ous = Resolve-ALTargetOUs $Cfg $Domain
     $Targets = Get-ALTargetComputers $Ous $Domain
     foreach ($Ou in $Ous) { Add-ALResult $R 'OK' 'Target OU' $Ou }
@@ -91,6 +137,7 @@ try {
     if ($Cfg.ReferenceServer) { Add-ALResult $R 'OK' 'Reference server' $Cfg.ReferenceServer }
     else { Add-ALResult $R 'WARN' 'Reference server' "not set - set ReferenceServer in the settings before 1_AL_build_policy.ps1 (a server in scope that looks like the others; for DCs any DC, e.g. the PDC emulator $($Domain.PDC))" }
 
+    # ---- toolkit, overlay, KnownAdmins
     if (Test-Path -LiteralPath (Join-Path $Cfg.ToolkitPath 'Create-Policies.ps1')) { Add-ALResult $R 'OK' 'AaronLocker' $Cfg.ToolkitPath } else { Add-ALResult $R 'FAIL' 'AaronLocker' "not found at $($Cfg.ToolkitPath) - it ships in this repository; run 0_AL_get_toolkit.ps1" }
     $Acc = Test-ALAccessChk -Path (Join-Path $Cfg.ToolkitPath 'AccessChk.exe') -Sha256 $Cfg.AccessChkSha256
     if ($Acc.Ok) { Add-ALResult $R $(if ($Cfg.AccessChkSha256) { 'OK' } else { 'WARN' }) 'AccessChk.exe' "$($Acc.Detail)$(if (-not $Cfg.AccessChkSha256) { ' - pin it: AccessChkSha256 in the settings' })" }
@@ -99,6 +146,7 @@ try {
     if ((Test-Path -LiteralPath (Join-Path $Overlay 'GetSafePathsToAllow.ps1')) -and (Test-Path -LiteralPath (Join-Path $Overlay 'KnownAdmins.ps1'))) { Add-ALResult $R 'OK' 'Customizations' 'overlay folder present' } else { Add-ALResult $R 'FAIL' 'Customizations' "missing or incomplete: $Overlay" }
     if (@($Cfg.KnownAdmins).Count) { Add-ALResult $R 'INFO' 'KnownAdmins' "treated as administrators: $(@($Cfg.KnownAdmins) -join ', ')" }
 
+    # ---- the two GPOs and their links (they may not exist yet)
     foreach ($Pair in @(@('Audit', $Cfg.AuditGpoName), @('Enforce', $Cfg.EnforceGpoName))) {
         $G = Get-GPO -Name $Pair[1] -Server $Domain.PDC -ErrorAction SilentlyContinue
         if (-not $G) { Add-ALResult $R 'INFO' "$($Pair[0]) GPO" "'$($Pair[1])' does not exist yet (created by 2_AL_create_gpos.ps1)"; continue }

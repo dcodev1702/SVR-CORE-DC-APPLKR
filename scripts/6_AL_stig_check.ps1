@@ -1,13 +1,54 @@
-# Step 6 - run from the management computer (Windows PowerShell 5.1 or PowerShell 7). Read-only. DISA STIG check, per server in scope:
-#   WN25-00-000080 / V-277992 (CAT II): "Windows Server 2025 must employ a deny-all, permit-by-exception policy to allow the execution
-#   of authorized software programs."
-# It uses the check text's own command (Get-AppLockerPolicy -Effective -XML) on each server:
-#   NotAFinding = Application Identity is running and the EXE rule collection is ENFORCED (Enabled) with allow rules, so everything the
-#                 rules do not allow is denied. AuditOnly is a finding (it blocks nothing); so is a stopped Application Identity service.
-#   Values shown: every rule collection (mode and rule count; DLL rules are not required by the STIG), Application Identity, which
-#   AppLocker GPO link is enabled, and blocked events (8004/8007) in the last 24 hours.
-# Evidence: each server's effective policy XML (+ SHA-256) in Outputs\<profile>\stig-<ts>\; results in Logs\6_AL_stig_check-<ts>.csv.
-# Exit code 1 when any server is Open.
+<#
+.SYNOPSIS
+    Step 9 - read-only DISA STIG check WN25-00-000080 / V-277992 (CAT II) per server, with evidence files.
+
+.DESCRIPTION
+    Run from the management computer. Nothing is changed. The STIG item: "Windows Server 2025 must employ a deny-all,
+    permit-by-exception policy to allow the execution of authorized software programs." On each server in scope the script runs the
+    check text's own command (Get-AppLockerPolicy -Effective -XML) over WinRM and decides:
+      NotAFinding  Application Identity is running and the EXE rule collection is ENFORCED (Enabled) with allow rules, so everything
+                   the rules do not allow is denied
+      Open         AuditOnly (it blocks nothing), no EXE collection, no rules, or a stopped Application Identity service
+      Not_Reviewed the server could not be checked
+    Values shown per server: every rule collection with its mode and rule count (DLL rules are not required by the STIG), the
+    MECM managed-installer collection and services enforcement when present, Application Identity, the OS, blocked events
+    (8004 / 8007) in the last 24 hours, and which AppLocker GPO link is enabled on the OU.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER TargetOU
+    Distinguished names of the OUs whose servers are checked. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
+
+.PARAMETER ComputerName
+    Servers to check. Default: every Windows Server computer in the target OUs.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: one block per server (Status, Reason, the collections, Application Identity, evidence path) in green
+    (NotAFinding) or red, and a summary line. Files: Outputs\<profile>\stig-<timestamp>\<server>-effective-applocker.xml (the
+    effective policy, SHA-256 in the results) and Logs\6_AL_stig_check-<timestamp>.csv (one row per server, STIG and vulnerability
+    IDs included). Transcript in Logs\6_AL_stig_check-<timestamp>.log. Exit code 1 when any server is Open or Not_Reviewed.
+
+.EXAMPLE
+    .\6_AL_stig_check.ps1
+    Checks every server in the target OUs.
+
+.EXAMPLE
+    .\6_AL_stig_check.ps1 -ComputerName dc01.contoso.com, dc02.contoso.com
+    Checks two servers.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules; WinRM to the servers.
+    Changes  : nothing (read-only).
+    README   : section 7, step 9; section 12 (audit evidence).
+#>
 param(
     [string]$SettingsFile,
     [string[]]$TargetOU,

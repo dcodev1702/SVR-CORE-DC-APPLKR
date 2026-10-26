@@ -1,13 +1,70 @@
-# Step 2 - run from the management computer (Windows PowerShell 5.1 or PowerShell 7) as a Domain Admin / GPO creator.
-# Creates (or updates) the two AppLocker GPOs from the newest build and links BOTH to every target OU:
-#   <AuditGpoName>    every collection AuditOnly   - logs what WOULD be blocked, blocks nothing
-#   <EnforceGpoName>  every collection Enabled     - blocks what the rules do not allow
-# New links are created DISABLED; an existing link keeps its state. Nothing reaches a server until 3_AL_set_mode.ps1 enables one link
-# (an ENABLED existing link applies the updated rules at the next refresh). Both GPOs carry the rules (Set-AppLockerPolicy -Ldap) and
-# System Services: Application Identity = Automatic. The DLL collection is switched off (EnableDllRules = $false).
-# Safety: an existing GPO is backed up first (Outputs\<profile>\gpo-backups\<ts>, Restore-GPO), the rules are read back from the GPO and
-# compared with the file, and the deployed files are recorded with their SHA-256 in <build>\deploy-<ts>.json.
-# -WhatIf shows the plan without changing anything. The AppLocker event logs of the servers in scope are enlarged (-SkipLogSize to leave them).
+<#
+.SYNOPSIS
+    Step 5 - creates or updates the Audit and Enforce AppLocker GPOs from the newest build and links both, disabled, to every target OU.
+
+.DESCRIPTION
+    Run from the management computer as a Domain Admin (or GPO creator). From the newest build (or -OutputFolder) it prepares two
+    deployable rule files and writes them into two GPOs:
+      <AuditGpoName>    every collection AuditOnly  - logs what WOULD be blocked, blocks nothing
+      <EnforceGpoName>  every collection Enabled    - blocks what the rules do not allow
+    Both GPOs carry the rules (Set-AppLockerPolicy -Ldap) and the System Services setting Application Identity = Automatic. The DLL
+    collection is switched off unless EnableDllRules is $true. New links are created DISABLED and an existing link keeps its state, so
+    nothing reaches a server until 3_AL_set_mode.ps1 enables one link (an ENABLED existing link applies the updated rules at the next
+    refresh). Safety: an existing GPO is backed up first (Outputs\<profile>\gpo-backups\<timestamp>, restorable with Restore-GPO), the
+    rules are read back from the GPO and compared with the file, and the deployed files are recorded with their SHA-256 in
+    <build>\deploy-<timestamp>.json. The AppLocker event logs of the servers in scope are enlarged to EventLogSizesMB.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER OutputFolder
+    A build folder (Outputs\<profile>\<timestamp>). Default: the newest build (Outputs\<profile>\latest.txt).
+
+.PARAMETER TargetOU
+    Distinguished names of the OUs to link the GPOs to. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
+
+.PARAMETER SkipLogSize
+    Leave the AppLocker event log sizes on the servers as they are.
+
+.PARAMETER NoConfirm
+    Skip the yellow Y/N prompt (automation). A non-interactive session without -NoConfirm stops before any change.
+
+.PARAMETER WhatIf
+    Show which build would go into which GPOs, and the link and log-size changes, without changing anything (the *-Deploy.xml files
+    are still prepared in the build folder).
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: the build used, per GPO "created" or "backed up, then updated", the rules read back from the GPO,
+    the GPO computer version, the links, the event log sizes, and the link states at the end. Files: <build>\*-Deploy.xml,
+    <build>\deploy-<timestamp>.json, Outputs\<profile>\gpo-backups\<timestamp>\ for an existing GPO. Transcript in
+    Logs\2_AL_create_gpos-<timestamp>.log. Exit code 1 on a STOP.
+
+.EXAMPLE
+    .\2_AL_create_gpos.ps1 -WhatIf
+    Shows which build would be deployed into which GPOs, without changing anything.
+
+.EXAMPLE
+    .\2_AL_create_gpos.ps1
+    Deploys the newest build (asks Y/N).
+
+.EXAMPLE
+    .\2_AL_create_gpos.ps1 -OutputFolder ..\Outputs\default\20261026-192905 -NoConfirm
+    Deploys a specific build without a prompt (automation).
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules and the AppLocker module;
+               create/link GPOs and write SYSVOL; WinRM to the servers for the event log sizes.
+    Changes  : domain - the two GPOs (rules, System Services, links); servers - AppLocker event log sizes.
+    Undo     : Restore-GPO -BackupId <id> -Path Outputs\<profile>\gpo-backups\<timestamp> for an updated GPO; a new GPO is linked disabled.
+    README   : section 7, step 5; section 13 (rollback).
+#>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [string]$SettingsFile,
@@ -55,6 +112,7 @@ try {
         '[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}{D02B1F72-3407-48AE-BA88-E8213C6761F1}]'
         '[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}]'
     )
+    # ---- per GPO: back up or create, write the rules and read them back, System Services, GPO version, link disabled where not linked
     $Deployed = New-Object System.Collections.Generic.List[object]
     foreach ($P in $Plan) {
         if (-not $PSCmdlet.ShouldProcess("GPO '$($P.Gpo)'", "write the $($P.Mode) rules ($($P.Summary)) and Application Identity = Automatic; link it DISABLED to $($Ous -join '; ') where not linked")) { continue }
@@ -103,6 +161,7 @@ try {
         Write-Host "Deployment record (files + SHA-256): $Record"
     }
 
+    # ---- AppLocker event log sizes on the servers in scope (the 1 MB default wraps in minutes)
     if (-not $SkipLogSize) {
         $Servers = @(@($Cfg.ReferenceServer) + $Targets | Where-Object { $_ } | Sort-Object -Unique)
         if ($Servers.Count -and $PSCmdlet.ShouldProcess("$($Servers.Count) server(s)", 'set the AppLocker event log sizes')) {

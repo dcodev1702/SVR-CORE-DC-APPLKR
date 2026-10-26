@@ -1,8 +1,41 @@
-# Unit tests for scripts\AL-Common.ps1 - no network, no domain, no changes outside a temporary folder (deleted at the end).
-# Windows PowerShell 5.1 and PowerShell 7, no Pester needed. ASCII-only.
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AL.ps1
-#   pwsh.exe       -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AL.ps1
-# Optional: -BuildFolder <Outputs\<profile>\<timestamp>> also checks New-ALDeployXml against a real build (compares with its *-Deploy.xml).
+<#
+.SYNOPSIS
+    Unit tests for scripts\AL-Common.ps1: no network, no domain, nothing changed outside a temporary folder.
+
+.DESCRIPTION
+    Runs in Windows PowerShell 5.1 and PowerShell 7 without Pester. It dot-sources AL-Common.ps1 and checks: the settings validation
+    (values that would widen the policy or damage a system folder are refused), the build folder lookup, AccessChk verification and
+    the PE machine check, the writable-permission check on crafted ACLs, path comparison helpers, the deploy XML conversion, rule
+    exceptions, the KnownAdmins helpers (canonical names, LDAP escaping, who counts, who never counts, entry format) and the in-place
+    settings write. Every test creates what it needs under a temporary folder that is deleted at the end. With -BuildFolder it also
+    compares New-ALDeployXml against a real build and checks that adding exceptions to it changes only the C:\Admin rules.
+
+.PARAMETER BuildFolder
+    Optional: a build folder (Outputs\<profile>\<timestamp>) to check the deploy XML conversion against its *-Deploy.xml files.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: one PASS / FAIL line per test and "Tests: all N passed" or "Tests: N passed, M FAILED".
+    Exit code 1 when any test fails.
+
+.EXAMPLE
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AL.ps1
+    Windows PowerShell 5.1.
+
+.EXAMPLE
+    pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AL.ps1 -BuildFolder ..\Outputs\default\20261026-192905
+    PowerShell 7, with the extra checks against a real build.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7. No modules, no elevation, no domain.
+    Changes  : nothing outside a temporary folder under %TEMP% (created and deleted by the run).
+#>
 param([string]$BuildFolder)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot

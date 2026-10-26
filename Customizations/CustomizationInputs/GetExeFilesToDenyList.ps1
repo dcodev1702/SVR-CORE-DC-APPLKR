@@ -12,6 +12,22 @@ Note: the solution also blocks the loading of PowerShell v2 modules - these bloc
 as currently designed can block only EXE files, not DLLs.
 http://www.leeholmes.com/blog/2017/03/17/detecting-and-preventing-powershell-downgrade-attacks/
 
+.INPUTS
+    None. Create-Policies.ps1 runs this script on the reference server; it takes no parameters.
+
+.OUTPUTS
+    System.String - one full path per line of an EXE under %windir% to deny for non-admin users (only files that exist).
+
+.EXAMPLE
+    & .\CustomizationInputs\GetExeFilesToDenyList.ps1
+    Lists the deny-list files present on this server (how Create-Policies.ps1 calls it).
+
+.NOTES
+    Origin   : microsoft/AaronLocker CustomizationInputs (MIT). Local change for SVR-CORE-DC-APPLKR: only files that exist are
+               emitted, because Server Core lacks some of them (e.g. mshta.exe) and Create-Policies.ps1 fails on a missing entry.
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Date     : 2026-10-26
+    Deployed : 1_AL_build_policy.ps1 copies the Customizations folder over the toolkit's own on the reference server for the build.
 #>
 
 # --------------------------------------------------------------------------------

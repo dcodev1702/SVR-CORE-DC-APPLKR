@@ -1,11 +1,63 @@
-# Step 0 (first script) - run on the management computer (Windows PowerShell 5.1 or PowerShell 7). Checks the two third-party pieces
-# that ship IN this repository, so nothing has to be downloaded inside the disconnected network:
-#   - AaronLocker (microsoft/AaronLocker, MIT) in <root>\AaronLocker
-#   - Sysinternals AccessChk (64-bit) in <toolkit>\AccessChk.exe: Microsoft signature, product name, 64-bit, pinned SHA-256
-# By default nothing is downloaded and no Internet access is attempted. Other ways to supply the files:
-#   .\0_AL_get_toolkit.ps1 -AaronLockerZip D:\Media\AaronLocker-main.zip -AccessChkPath D:\Media\accesschk64.exe   # import by hand
-#   .\0_AL_get_toolkit.ps1 -Download                                                                                # Internet-connected computer only
-# The servers and domain controllers never need Internet: 1_AL_build_policy.ps1 copies AccessChk.exe to the reference server over WinRM.
+<#
+.SYNOPSIS
+    Step 1 - verifies the third-party pieces that ship in this repository: AaronLocker and Sysinternals AccessChk (64-bit, pinned SHA-256).
+
+.DESCRIPTION
+    Run first, on the management computer. By default nothing is downloaded and no Internet access is attempted, so the script works
+    inside a disconnected network. It checks:
+      - AaronLocker (microsoft/AaronLocker, MIT) in <root>\AaronLocker: Create-Policies.ps1 must be present.
+      - AccessChk.exe in <root>\AaronLocker\AaronLocker: a valid Microsoft Authenticode signature, the product name Sysinternals
+        AccessChk, a 64-bit build and, when AccessChkSha256 is set in the settings, the pinned SHA-256.
+    A missing piece can be imported from files carried across the approved transfer path (-AaronLockerZip, -AccessChkPath) or, on an
+    Internet-connected computer only, downloaded with -Download. An imported or downloaded AccessChk that fails the checks is removed
+    again; the copy that ships in the repository is never deleted.
+    The servers never need Internet: 1_AL_build_policy.ps1 copies the toolkit to the reference server over WinRM.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script. One file per server class (README, section 5).
+
+.PARAMETER RepoPath
+    Folder that holds, or will hold, the AaronLocker repository. Default: <root>\AaronLocker.
+
+.PARAMETER AaronLockerZip
+    Offline import: a GitHub zip of microsoft/AaronLocker (Code > Download ZIP) copied to this computer.
+
+.PARAMETER AccessChkPath
+    Offline import: accesschk64.exe taken from https://download.sysinternals.com/files/AccessChk.zip and copied to this computer. It is
+    verified before it is copied into the toolkit.
+
+.PARAMETER Download
+    Internet-connected computer only: download what is missing (AaronLocker from GitHub, AccessChk from Sysinternals).
+
+.INPUTS
+    None. Nothing can be piped to this script; the settings come from the settings file.
+
+.OUTPUTS
+    None to the pipeline. Console: the AccessChk verdict (signature, version, SHA-256, pinned or not) and "Toolkit ready".
+    Transcript: Logs\0_AL_get_toolkit-<timestamp>.log. Exit code 1 when a piece is missing or rejected (the message starts with STOP).
+
+.EXAMPLE
+    .\0_AL_get_toolkit.ps1
+    Verifies the files that ship in the repository. Expected: "AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit),
+    SHA-256 843B6B1D... (pinned)" and "Toolkit ready".
+
+.EXAMPLE
+    .\0_AL_get_toolkit.ps1 -AaronLockerZip D:\Media\AaronLocker-main.zip -AccessChkPath D:\Media\accesschk64.exe
+    Imports both pieces from media inside the disconnected network.
+
+.EXAMPLE
+    .\0_AL_get_toolkit.ps1 -Download
+    Internet-connected computer only: fetches whatever is missing.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7 on the management computer. No elevation, no domain access.
+    Changes  : nothing, unless -AaronLockerZip, -AccessChkPath or -Download adds a missing piece under <root>\AaronLocker.
+    README   : section 4 (bring the repository into the disconnected network), section 12 (updating AccessChk).
+#>
 param(
     [string]$SettingsFile,
     # Folder that holds / will hold the AaronLocker repository (default <root>\AaronLocker)

@@ -22,6 +22,24 @@ AppLocker does the right thing with SUBSTed drive letters.
 
 TODO: At some point, reimplement with hashtable output supporting "label" and "RuleCollection" properties so that path rules have more descriptive names, and can be applied to specific rule collections.
 
+.INPUTS
+    None. Create-Policies.ps1 runs this script on the reference server; it takes no parameters. The local addition reads
+    ExtraAllowedPaths.txt next to this script (written by 1_AL_build_policy.ps1 from the ExtraAllowedPaths setting).
+
+.OUTPUTS
+    System.String - one path per line that every account may run from: \\<domain>\netlogon\*, \\<domain>\sysvol\*, the Defender
+    platform folder, and every ExtraAllowedPaths entry (e.g. C:\Admin\*).
+
+.EXAMPLE
+    & .\CustomizationInputs\GetSafePathsToAllow.ps1
+    Lists the extra allowed paths for this server (how Create-Policies.ps1 calls it).
+
+.NOTES
+    Origin   : microsoft/AaronLocker CustomizationInputs (MIT). Local change for SVR-CORE-DC-APPLKR: the ExtraAllowedPaths.txt hook at
+               the end. The entries must be writable by administrators only; 1_AL_build_policy.ps1 checks that on every server in
+               scope and leaves out or excepts what a non-admin can change (README, section 8).
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Date     : 2026-10-26
 #>
 
 # Add the standard domain controller GPO file shares for the computer's AD domain, and if different, for the user account's domain.

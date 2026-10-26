@@ -1,14 +1,62 @@
-# Step 1 - run from the management computer (Windows PowerShell 5.1 or PowerShell 7) as a Domain Admin. Builds the AaronLocker AppLocker
-# baseline ON the reference server, because the rules depend on that machine's file system (user-writable folders under Windows and
-# Program Files - including the MECM client's folders -, tools present, safe paths).
-#   1. checks the AccessChk.exe that ships with the toolkit (Microsoft signature, 64-bit, pinned SHA-256) - nothing is downloaded
-#   2. copies the toolkit + Customizations + KnownAdmins to a temporary folder on the server over WinRM
-#   3. checks every ExtraAllowedPaths entry (C:\Admin ...) on the reference server AND every server in the target OUs, and never stops on
-#      what it finds: an entry a non-admin can change is LEFT OUT of the policy; items inside it that a non-admin can change become
-#      EXCEPTIONS of its rule. So the policy never allows what a non-admin can write, and no permission is ever changed.
-#   4. runs Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan on the server (it only READS permissions; nothing is applied to the server)
-#   5. copies the results to <root>\Outputs\<profile>\<timestamp>\ (+ the exceptions from step 3, recorded in build-info.json) and
-#      removes the temporary folder from the server
+<#
+.SYNOPSIS
+    Step 4 - builds the AaronLocker AppLocker baseline on the reference server and brings the rule files back to Outputs\.
+
+.DESCRIPTION
+    Run from the management computer as a Domain Admin. The rules are built ON the reference server because they depend on that
+    machine's file system (user-writable folders under Windows and Program Files, including the MECM client's folders, the tools
+    present, the safe paths). The steps:
+      1. checks the AccessChk.exe that ships with the toolkit (Microsoft signature, 64-bit, pinned SHA-256); nothing is downloaded
+      2. copies the toolkit, the Customizations overlay and the KnownAdmins list to a temporary folder on the server over WinRM
+      3. checks every ExtraAllowedPaths entry (C:\Admin ...) on the reference server AND every server in the target OUs, and never
+         stops on what it finds: an entry a non-admin can change is LEFT OUT of the policy; items inside it that a non-admin can change
+         become EXCEPTIONS of its rule. The policy never allows what a non-admin can write, and no permission is ever changed
+      4. runs Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan on the server (it only READS permissions; nothing is applied)
+      5. copies the results to <root>\Outputs\<profile>\<timestamp>\ with the exceptions from step 3 and the SHA-256 of every rule
+         file recorded in build-info.json, and removes the temporary folder from the server
+    Outputs\<profile>\latest.txt names the newest build; 2_AL_create_gpos.ps1 deploys it.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER ComputerName
+    FQDN of the server to build on. Default: the ReferenceServer setting (required: one of the servers in scope that looks like the
+    others; for domain controllers any DC, the PDC emulator is a good choice).
+
+.PARAMETER ExtraAllowedPaths
+    Folders (ending in \*) or files that every account may run from, outside Windows and Program Files. Overrides the setting.
+
+.PARAMETER RemoteWork
+    Temporary work folder on the server. It is DELETED before and after the build, so its name must start with AaronLocker.
+    Default: C:\AaronLocker.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Files in Outputs\<profile>\<timestamp>\: AppLockerRules-<ts>-Audit.xml and -Enforce.xml, ScanResults\
+    (Writable_*.txt = the user-writable folders carved out of the rules), build-info.json (settings, the decision for every
+    ExtraAllowedPaths entry, SHA-256 of the rule files). Console: the AaronLocker output and "Results: <folder>". Transcript in
+    Logs\1_AL_build_policy-<timestamp>.log. Exit code 1 on a STOP (nothing deployed, the temporary folder removed).
+
+.EXAMPLE
+    .\1_AL_build_policy.ps1
+    Builds on the ReferenceServer named in the settings.
+
+.EXAMPLE
+    .\1_AL_build_policy.ps1 -ComputerName dc01.contoso.com
+    Builds on another server in scope.
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT ActiveDirectory module; WinRM administrator on the servers; FullLanguage
+               mode and an execution policy that runs unsigned scripts on the reference server (AaronLocker's scripts are not signed).
+    Changes  : a temporary folder on the reference server (created, then deleted). No policy and no permission is changed.
+    README   : section 7, step 4; section 8 (C:\Admin); section 11 (who counts as an administrator).
+#>
 param(
     [string]$SettingsFile,
     [string]$ComputerName,
@@ -27,10 +75,12 @@ try {
     $Overlay = Join-Path $Cfg.Root 'Customizations'
     if (-not (Test-Path -LiteralPath (Join-Path $Cfg.ToolkitPath 'Create-Policies.ps1'))) { throw "STOP: AaronLocker not found at $($Cfg.ToolkitPath). Run 0_AL_get_toolkit.ps1." }
     if (-not (Test-Path -LiteralPath $Overlay)) { throw "STOP: $Overlay is missing." }
+    # 1. the AccessChk that ships with the toolkit must be the verified one
     $Check = Test-ALAccessChk -Path (Join-Path $Cfg.ToolkitPath 'AccessChk.exe') -Sha256 $Cfg.AccessChkSha256
     if (-not $Check.Ok) { throw "STOP: AccessChk.exe - $($Check.Detail)" }
     Write-Host "AccessChk.exe: $($Check.Detail)"
 
+    # 2. a fresh temporary work folder on the reference server: toolkit + Customizations overlay
     $Session = New-PSSession -ComputerName $ComputerName -ErrorAction Stop
     Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
         $os = Get-CimInstance Win32_OperatingSystem
@@ -53,6 +103,7 @@ try {
         Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\KnownAdmins.txt') -Value $using:Known -Encoding UTF8 }
         Write-Host "Known administrators groups: $($Known -join ', ')"
     }
+    # 3. ExtraAllowedPaths: who can change them, on every server the policy will reach (never stops; decides keep / drop / except)
     $Plan = [pscustomobject]@{ Keep = @(); Drop = @(); Exceptions = @{} }
     $Checked = @(); $Unchecked = @()
     if ($Extra.Count) {
@@ -81,11 +132,13 @@ try {
         if ($Keep.Count) { Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\ExtraAllowedPaths.txt') -Value $using:Keep -Encoding UTF8 } }
     }
 
+    # 4. AaronLocker builds the rules on the server (it only reads permissions; nothing is applied there)
     Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
         Set-Location -LiteralPath $using:RemoteWork
         & .\Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan
     }
 
+    # 5. bring the results back, add the exceptions from step 3, record the build (build-info.json, latest.txt)
     $Dest = Join-Path $Cfg.OutRoot $Cfg.Stamp
     New-Item -Path $Dest -ItemType Directory -Force | Out-Null
     Copy-Item -Path (Join-Path $RemoteWork 'Outputs\*') -Destination $Dest -FromSession $Session -Recurse -Force

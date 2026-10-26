@@ -157,6 +157,8 @@ Run every script from the `scripts` folder, in **Windows PowerShell 5.1** (`powe
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\<script>.ps1 [parameters]
 ```
 
+Every script carries comment-based help: `Get-Help .\<script>.ps1 -Full` shows its purpose, parameters, inputs, outputs, examples and what it changes.
+
 | Step | Script | What it does | Changes |
 |---|---|---|---|
 | 1 | `0_AL_get_toolkit.ps1` | Verifies AaronLocker + AccessChk (signature, 64-bit, pinned SHA-256) | nothing (`-Download` / import only when asked) |

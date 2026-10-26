@@ -1,14 +1,68 @@
-# Step 0 (third script) - run from the management computer (Windows PowerShell 5.1 or PowerShell 7) as a Domain Admin, BEFORE the build.
-# The ONLY script in this toolkit that sets permissions. For each SecureFolders entry (default C:\Admin) on the reference server and every
-# server in the target OUs:
-#   missing folder             -> created, SYSTEM + Administrators full control only (inheritance removed)
-#   existing, admin-only       -> left alone
-#   existing, writable by a non-admin -> only REPORTED; its permissions are replaced only when you add -Fix
-# Why: AppLocker allows everything under C:\Admin\* for every account, and any user may create a folder under C:\ (and owns what they
-# create there) - until an administrator creates C:\Admin with locked-down permissions, a user could create it first and plant code.
-# Before -Fix replaces permissions, the previous ones are printed as SDDL (kept in the transcript) so they can be restored.
-# Nothing outside SecureFolders is ever touched (not C:\Temp, not C:\Sysmon); system folders are refused by the settings check.
-# The servers are surveyed read-only first: with nothing to change there is no prompt. -WhatIf shows the plan without changing anything.
+<#
+.SYNOPSIS
+    Step 3 - creates a missing SecureFolders entry (default C:\Admin) administrators-only on every server in scope; reports a writable one.
+
+.DESCRIPTION
+    The only script in this toolkit that sets permissions. Run from the management computer as a Domain Admin, before the build.
+    For each SecureFolders entry, on the reference server and every server in the target OUs (or -ComputerName):
+      missing folder                     -> created: SYSTEM + Administrators full control only, inheritance removed
+      existing, administrators-only      -> left alone
+      existing, writable by a non-admin  -> only REPORTED; its permissions are replaced only with -Fix
+    Why: the policy allows everything under C:\Admin\* for every account, and any user may create a folder directly under C:\ (and owns
+    what they create there). Until an administrator creates C:\Admin with locked-down permissions, a user could create it first and
+    plant code in it. Nothing outside SecureFolders is ever touched (not C:\Temp, not C:\Sysmon); system folders are refused by the
+    settings check. The servers are surveyed read-only first: when nothing has to change there is no prompt. Before -Fix replaces
+    permissions, the previous ones are printed as SDDL and kept in the transcript so they can be restored. -WhatIf shows the plan
+    without changing anything. Every change is verified from the server afterwards.
+
+.PARAMETER SettingsFile
+    Settings file to use. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER ComputerName
+    Servers to handle. Default: the reference server plus every Windows Server computer in the target OUs.
+
+.PARAMETER Folder
+    Folders to handle. Overrides the SecureFolders setting (local folders such as C:\Admin; a system folder is refused).
+
+.PARAMETER Fix
+    Also REPLACE the permissions of an existing folder that a non-admin can change. Without -Fix such a folder is only reported.
+
+.PARAMETER NoConfirm
+    Skip the yellow Y/N prompt (automation). A non-interactive session without -NoConfirm stops before any change.
+
+.PARAMETER WhatIf
+    Survey only: show what would be created or replaced without changing anything.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: per server and folder "missing - will be created", "WRITABLE by non-admins" or "administrators-only
+    - OK", then the result of every change as read back from the server ("created; verified SYSTEM + Administrators only").
+    Transcript: Logs\0_AL_secure_folders-<timestamp>.log.
+
+.EXAMPLE
+    .\0_AL_secure_folders.ps1 -WhatIf
+    Survey only: what would be created, what is writable.
+
+.EXAMPLE
+    .\0_AL_secure_folders.ps1
+    Creates a missing C:\Admin administrators-only on every server in scope (asks Y/N).
+
+.EXAMPLE
+    .\0_AL_secure_folders.ps1 -Fix -NoConfirm
+    Also replaces the permissions of an existing writable folder, without a prompt (the previous SDDL is printed first).
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT ActiveDirectory module; WinRM administrator on the servers.
+    Changes  : only the SecureFolders entries on the servers in scope - a missing folder, or with -Fix an existing one.
+    Undo     : delete a created folder; restore a replaced ACL from the SDDL printed before the change.
+    README   : section 7, step 3 (C:\Admin).
+#>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [string]$SettingsFile,

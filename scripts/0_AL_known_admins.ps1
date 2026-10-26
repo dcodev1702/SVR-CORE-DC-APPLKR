@@ -1,20 +1,84 @@
-# Step 2 (optional) - run from the management computer (Windows PowerShell 5.1 or PowerShell 7) with an account that can read AD.
-# Turns the administrators groups of your organisation into KnownAdmins entries for AL-Settings.psd1 (README, section 11). Give it
-# what Active Directory Users and Computers shows - the canonical name of an OU (every security group directly in it; -Recurse adds
-# the sub-OUs), of a group or of a user - or a distinguished name. Several -Path values are allowed.
-#   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'   # survey: shows the groups
-#                                                                                                             # of each account, lists nothing
-#   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups'        # prints the entries
-#   .\0_AL_known_admins.ps1 -Path 'contoso.com/Tier 0/Groups/Tier0-Server-Admins' -Update                # writes them (asks Y/N)
-#   .\0_AL_known_admins.ps1 -Path 'OU=Admin-Groups,OU=Tier 0,DC=contoso,DC=com' -Recurse -Update -NoConfirm
-# Only a group that holds write access on a folder under C:\Windows, Program Files or an ExtraAllowedPaths entry, and is not in
-# Administrators, needs an entry (README, section 11: what the setting is for, who is affected). Permissions name groups, not people.
-# Without -Update nothing is written: the KnownAdmins line is printed, ready to paste. -Update merges the entries into the settings
-# file (-Replace discards the existing ones) after a backup to Outputs\<profile>\settings-backups and a Y/N prompt; -WhatIf shows it.
-# It refuses the whole domain and every group that must never count as an administrator (Domain Users, Authenticated Users, ...).
-# It skips what already counts (Administrators, Domain Admins, Enterprise Admins, ...), distribution groups (they cannot hold
-# permissions) and user accounts - KnownAdmins is for groups; -IncludeUsers lists them anyway. -AsSid writes SIDs instead of names.
-# The new value applies at the next build (1_AL_build_policy.ps1, then 2_AL_create_gpos.ps1). Nothing on a server changes here.
+<#
+.SYNOPSIS
+    Step 2 (optional) - turns an OU or a group from Active Directory into KnownAdmins entries for the settings file.
+
+.DESCRIPTION
+    Run from the management computer with an account that can read Active Directory. Give it what Active Directory Users and
+    Computers shows: the canonical name of an OU (every security group directly in it; -Recurse adds the sub-OUs), of a group or of a
+    user, or a distinguished name. Several -Path values are allowed.
+    Only a group that holds write access on a folder under C:\Windows, Program Files or an ExtraAllowedPaths entry, and is not in
+    Administrators, needs an entry (README, section 11: what the setting is for, who is affected). Permissions name groups, not people.
+    Without -Update nothing is written: the KnownAdmins line is printed, ready to paste. -Update merges the entries into the settings
+    file (-Replace discards the existing ones) after a backup to Outputs\<profile>\settings-backups and a Y/N prompt; the new text is
+    proven to load before the file is touched; -WhatIf shows the change without making it.
+    It refuses the whole domain and every group that must never count as an administrator (Domain Users, Authenticated Users, ...).
+    It skips what already counts (Administrators, Domain Admins, Enterprise Admins, Server / Print / Backup Operators), distribution
+    groups (they cannot hold permissions) and user accounts (reported with the groups they belong to). The new value applies at the next
+    build (1_AL_build_policy.ps1, then 2_AL_create_gpos.ps1). Nothing on a server changes here.
+
+.PARAMETER Path
+    One or more canonical names (contoso.com/Top OU/Sub OU/Name, as ADUC shows them) or distinguished names (OU=...,DC=...) of an OU,
+    a container, a group or a user. A slash inside a name is written \/ in a canonical name. Aliases: -CanonicalName, -DistinguishedName.
+
+.PARAMETER SettingsFile
+    Settings file to read and, with -Update, to write. Default: AL-Settings.psd1 next to the script.
+
+.PARAMETER Recurse
+    For an OU: include the groups (and users) in its sub-OUs. Default: only what is directly in the OU.
+
+.PARAMETER IncludeUsers
+    Also list user accounts as entries. Normally not needed: permissions name groups. Use it only for a permission that names a person.
+
+.PARAMETER AsSid
+    Write SIDs instead of DOMAIN\Name. A name the settings check refuses, or a non-ASCII name, falls back to its SID anyway.
+
+.PARAMETER Update
+    Write the result into the settings file (merged with the existing entries) after a backup and a Y/N prompt. Without -Update the
+    line is only printed.
+
+.PARAMETER Replace
+    With -Update: discard the existing entries instead of merging with them.
+
+.PARAMETER NoConfirm
+    Skip the yellow Y/N prompt (automation). A non-interactive session without -NoConfirm stops before the file is written.
+
+.PARAMETER WhatIf
+    With -Update: show the change that would be written without touching the settings file.
+
+.INPUTS
+    None. Nothing can be piped to this script.
+
+.OUTPUTS
+    None to the pipeline. Console: one row per principal found (OK = entry, INFO = already an administrator or a user not listed,
+    WARN = distribution group), the KnownAdmins line ready to paste, and with -Update the backup path and the SHA-256 before and after.
+    Rows as CSV in Logs\0_AL_known_admins-<timestamp>.csv; transcript in Logs\0_AL_known_admins-<timestamp>.log. Exit code 1 on a STOP.
+
+.EXAMPLE
+    .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'
+    Survey of an OU of administrator accounts: prints each account with the groups it belongs to and lists nothing. Writes nothing.
+
+.EXAMPLE
+    .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups'
+    Prints the KnownAdmins line for every security group directly in that OU. Writes nothing.
+
+.EXAMPLE
+    .\0_AL_known_admins.ps1 -Path 'contoso.com/Tier 0/Groups/Tier0-Server-Admins' -Update
+    Adds one group to the settings file after a backup and a Y/N prompt.
+
+.EXAMPLE
+    .\0_AL_known_admins.ps1 -Path 'OU=Admin-Groups,OU=Tier 0,DC=contoso,DC=com' -Recurse -Update -NoConfirm
+    Every security group in that OU tree, written without a prompt (automation).
+
+.NOTES
+    Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
+    Author   : dcodev1702
+    Date     : 2026-10-26
+    Version  : 1.0
+    Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT ActiveDirectory module; read access to Active Directory.
+    Changes  : only the settings file, only with -Update (backup first). Nothing on a server.
+    Undo     : copy the backup from Outputs\<profile>\settings-backups over the settings file, or edit the KnownAdmins line.
+    README   : section 11 (who counts as an administrator; what KnownAdmins is for).
+#>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [Parameter(Mandatory)][Alias('CanonicalName', 'DistinguishedName')][ValidateNotNullOrEmpty()][string[]]$Path,
