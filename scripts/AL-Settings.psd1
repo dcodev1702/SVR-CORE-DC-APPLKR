@@ -32,10 +32,16 @@
 
     # Groups (DOMAIN\Name or SID) that are administrators in your organisation although they are not in the built-in Administrators group,
     # e.g. 'CONTOSO\Tier0-Server-Admins'. Their write access does not count as "user-writable" - in AaronLocker's scan and in the
-    # ExtraAllowedPaths check. Empty = only the built-in administrators (README, "Who counts as an administrator"). Fill it from an OU
-    # or a group with 0_AL_known_admins.ps1 -Path '<canonical name as ADUC shows it>' [-Update]. Never list Domain Users, Authenticated
-    # Users or another group every account belongs to - the scripts refuse those.
-    KnownAdmins       = @('SKYNET\lorenzo')
+    # ExtraAllowedPaths check. Empty = only the built-in administrators (README, "Who counts as an administrator").
+    # Only a group that holds write access on a folder under C:\Windows, Program Files or an ExtraAllowedPaths entry, and is not in
+    # Administrators, needs an entry. Not needed: SYSTEM, Administrators, Administrator, Domain Admins, Enterprise Admins, Server/Print/
+    # Backup Operators - they already count. Not needed either: the user accounts in an admin OU - permissions name groups, not people.
+    # Never list Domain Users, Authenticated Users or another group every account belongs to - the scripts refuse those.
+    # Survey the OU of your administrator accounts (writes nothing, shows the groups each account belongs to):
+    #   0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'
+    # Then write the groups that 0_AL_pre-flight.ps1 / ScanResults\Writable_*.txt name as writers (README, section 11):
+    #   0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups/Tier0-Server-Admins' -Update
+    KnownAdmins       = @()
 
     # SHA-256 of the AccessChk.exe that ships in AaronLocker\AaronLocker (Sysinternals AccessChk 6.15, 64-bit). Every script refuses a file
     # with another hash. When you replace AccessChk, verify the new file (README, "Updating AccessChk") and update this value.

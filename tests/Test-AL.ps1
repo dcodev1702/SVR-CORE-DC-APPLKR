@@ -53,6 +53,8 @@ try {
     $Psd = Join-Path $Tmp 'AL-Settings.psd1'
     Copy-Item -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1') -Destination $Psd
     $Orig = [IO.File]::ReadAllText($Psd)
+    $OrigValues = @((Import-PowerShellDataFile -LiteralPath $Psd).KnownAdmins)
+    $StripKa = '(?m)^\s*KnownAdmins\s*=.*$'
     $W = Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Tier0 Admins', "CONTOSO\O'Brien Admins") -BackupFolder (Join-Path $Tmp 'bak')
     $Now = [IO.File]::ReadAllText($Psd)
     Assert 'settings write: the value reads back' (((Import-PowerShellDataFile -LiteralPath $Psd).KnownAdmins -join '|') -eq "CONTOSO\Tier0 Admins|CONTOSO\O'Brien Admins")
@@ -60,10 +62,12 @@ try {
     Assert 'settings write: CRLF kept, no BOM' ($Now.Contains("`r`n") -and -not $Now.Contains("`r`r") -and ([IO.File]::ReadAllBytes($Psd)[0] -eq 0x23))
     Assert 'settings write: backup is the original, hashes recorded' ((Test-Path -LiteralPath $W.Backup) -and (Get-FileHash -LiteralPath $W.Backup).Hash -eq $W.Before -and $W.Before -ne $W.After -and (Get-FileHash -LiteralPath $Psd).Hash -eq $W.After)
     [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @() -BackupFolder (Join-Path $Tmp 'bak'))
-    Assert 'settings write: an empty list gives @() - the original text back' ([IO.File]::ReadAllText($Psd) -eq $Orig)
+    Assert 'settings write: an empty list gives @()' ([IO.File]::ReadAllText($Psd) -match '(?m)^\s*KnownAdmins\s*=\s*@\(\)\r?$')
     [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\X') -BackupFolder (Join-Path $Tmp 'bak'))
     [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values $null -BackupFolder (Join-Path $Tmp 'bak'))
-    Assert 'settings write: $null gives @() too' ([IO.File]::ReadAllText($Psd) -eq $Orig)
+    Assert 'settings write: $null gives @() too' ([IO.File]::ReadAllText($Psd) -match '(?m)^\s*KnownAdmins\s*=\s*@\(\)\r?$')
+    [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values $OrigValues -BackupFolder (Join-Path $Tmp 'bak'))
+    Assert 'settings write: the shipped value written back - same value, rest of the file byte-identical' (((Import-PowerShellDataFile -LiteralPath $Psd).KnownAdmins -join '|') -eq ($OrigValues -join '|') -and (([IO.File]::ReadAllText($Psd) -replace $StripKa, '') -eq ($Orig -replace $StripKa, '')))
     $Hash = (Get-FileHash -LiteralPath $Psd).Hash
     Assert 'settings write: a value the settings refuse stops before the file is touched' ((Throws { Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Domain Users') -BackupFolder (Join-Path $Tmp 'bak') }) -and (Get-FileHash -LiteralPath $Psd).Hash -eq $Hash)
     Assert 'settings write: a non-ASCII value stops' ((Throws { Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Admins' + [char]0xE9) -BackupFolder (Join-Path $Tmp 'bak') }) -and (Get-FileHash -LiteralPath $Psd).Hash -eq $Hash)

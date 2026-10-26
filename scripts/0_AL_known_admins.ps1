@@ -2,9 +2,13 @@
 # Turns the administrators groups of your organisation into KnownAdmins entries for AL-Settings.psd1 (README, section 11). Give it
 # what Active Directory Users and Computers shows - the canonical name of an OU (every security group directly in it; -Recurse adds
 # the sub-OUs), of a group or of a user - or a distinguished name. Several -Path values are allowed.
+#   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'   # survey: shows the groups
+#                                                                                                             # of each account, lists nothing
 #   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups'        # prints the entries
 #   .\0_AL_known_admins.ps1 -Path 'contoso.com/Tier 0/Groups/Tier0-Server-Admins' -Update                # writes them (asks Y/N)
 #   .\0_AL_known_admins.ps1 -Path 'OU=Admin-Groups,OU=Tier 0,DC=contoso,DC=com' -Recurse -Update -NoConfirm
+# Only a group that holds write access on a folder under C:\Windows, Program Files or an ExtraAllowedPaths entry, and is not in
+# Administrators, needs an entry (README, section 11: what the setting is for, who is affected). Permissions name groups, not people.
 # Without -Update nothing is written: the KnownAdmins line is printed, ready to paste. -Update merges the entries into the settings
 # file (-Replace discards the existing ones) after a backup to Outputs\<profile>\settings-backups and a Y/N prompt; -WhatIf shows it.
 # It refuses the whole domain and every group that must never count as an administrator (Domain Users, Authenticated Users, ...).

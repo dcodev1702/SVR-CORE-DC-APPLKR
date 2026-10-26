@@ -80,7 +80,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
                    GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
-  tests\           Test-AL.ps1 (149 unit tests, no network, both PowerShell editions; 152 with -BuildFolder)
+  tests\           Test-AL.ps1 (150 unit tests, no network, both PowerShell editions; 153 with -BuildFolder)
   images\          architecture diagram (spec, SVG, PNG)
   Outputs\<profile>\<timestamp>\        created by the scripts: rules, scan results, hashes, deploy records, GPO backups
   Logs\                                 created by the scripts: one transcript (+ CSV of results) per run
@@ -125,7 +125,7 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
    Expected: `AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit), SHA-256 843B6B1D...F9F3 (pinned)` and `Toolkit ready`.
 
 > [!TIP]
-> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 149 passed`.
+> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 150 passed`.
 
 ---
 
@@ -140,7 +140,7 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 | `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC25-1.skynet-home.local` (the lab DC) |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
-| `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | `SKYNET\lorenzo` (the lab's DA account; replace with your groups) |
+| `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
 | `EnableDllRules` | `$false` = DLL collection off | `$false` |
 | `EventLogSizesMB` | AppLocker log sizes on the servers | 100 MB for each of the four logs |
@@ -160,7 +160,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\<script>.ps1 [paramete
 | Step | Script | What it does | Changes |
 |---|---|---|---|
 | 1 | `0_AL_get_toolkit.ps1` | Verifies AaronLocker + AccessChk (signature, 64-bit, pinned SHA-256) | nothing (`-Download` / import only when asked) |
-| 2 | `0_AL_known_admins.ps1 -Path <OU or group>` | Optional: turns your own administrators groups (canonical name, as ADUC shows it) into `KnownAdmins` entries; `-Update` writes them | nothing (`-Update`: `AL-Settings.psd1`, after a backup) |
+| 2 | `0_AL_known_admins.ps1 -Path <OU or group>` | Optional: surveys the OU of your administrator accounts (shows their groups), or turns your administrators groups (canonical name, as ADUC shows it) into `KnownAdmins` entries; `-Update` writes them | nothing (`-Update`: `AL-Settings.psd1`, after a backup) |
 | 2 | `0_AL_pre-flight.ps1` | Modules, rights, OUs, toolkit, WinRM, language mode, execution policy, existing AppLocker policy, **MECM**, **Nessus**, services/tasks outside the allowed folders, **`C:\Admin` permissions** | read-only |
 | 3 | `0_AL_secure_folders.ps1` | Creates a missing `C:\Admin` administrators-only; reports a writable one | DCs (only a **missing** folder; an existing one only with `-Fix`) |
 | 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC, checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back | temporary folder on the reference DC |
@@ -186,7 +186,11 @@ Already done in [section 4](#4-bring-the-repository-into-the-disconnected-networ
 
 ### Step 2 — Pre-flight
 
-Set `ReferenceServer` (and `TargetOUs` if not the DCs) in `AL-Settings.psd1` — and `KnownAdmins` if your organisation has its own administrators groups (`0_AL_known_admins.ps1`, [section 11](#11-who-counts-as-an-administrator)) — then:
+Set `ReferenceServer` (and `TargetOUs` if not the DCs) in `AL-Settings.psd1`. If your organisation has its own administrators groups, survey the OU that holds your administrator accounts first — it writes nothing and shows which groups they belong to; [section 11](#11-who-counts-as-an-administrator) says what to do with the result:
+```powershell
+.\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'
+```
+Then:
 ```powershell
 .\0_AL_pre-flight.ps1
 ```
@@ -373,12 +377,42 @@ AaronLocker decides which folders under `C:\Windows` and `Program Files` are *us
 - **It is the normal model** (Microsoft's AaronLocker; AppLocker's own default rules don't even carve these folders out).
 - **Enterprise caveat:** your own delegated administrators groups (e.g. `CONTOSO\Tier0-Server-Admins`) are not on the list. A folder they can write gets carved out (more restrictive: Audit noise, never a silent opening). List such groups in **`KnownAdmins`** — the setting feeds AaronLocker's scan and the `C:\Admin` check alike.
 - The `C:\Admin` check uses the same model, plus the direct members of `Administrators` (on a DC: `Administrator`, `Domain Admins`, `Enterprise Admins`).
-- **Filling `KnownAdmins`:** `0_AL_known_admins.ps1` turns an OU or a group into entries, from the canonical name as Active Directory Users and Computers shows it (a distinguished name works too):
-  ```powershell
-  .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups'            # prints the line to paste
-  .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups' -Update    # writes it (Y/N; backup in Outputs\<profile>\settings-backups)
-  ```
-  It lists every **security group** directly in the OU (`-Recurse` adds the sub-OUs) as `DOMAIN\Name` (`-AsSid` for SIDs) and merges them with the existing entries (`-Replace` discards those). It skips what already counts (`Administrators`, `Domain Admins`, `Enterprise Admins`, Server / Print / Backup Operators), distribution groups, and **user accounts** — an OU that holds only administrator *user accounts* yields nothing, because permissions name the groups those accounts belong to (`-IncludeUsers` lists them anyway). It **refuses** the whole domain and every group that must never count (`Domain Users`, `Domain Computers`, `Authenticated Users`, `Users`, `Everyone`, …); the settings check refuses those entries too. The new value applies at the next build (steps 4–5).
+
+### What `KnownAdmins` is for, and who is affected
+
+The setting answers one question for the scan: *"this account can write here — is it an administrator?"* It never adds an allow rule and never changes a permission. Permissions name **groups**, almost never people, so the setting is a list of groups.
+
+| Principal | In `KnownAdmins`? | Why |
+|---|---|---|
+| `SYSTEM`, the service accounts, `Administrators`, `Administrator`, `Domain Admins`, `Enterprise Admins`, Server / Print / Backup Operators | **No** — already counts | Listing it changes nothing; the script reports *Already an administrator* and skips it |
+| A delegated administrators group that is **not** in `Administrators` but holds write access on a folder under `C:\Windows`, `Program Files` or `C:\Admin` (e.g. `CONTOSO\Tier0-Server-Admins`) | **Yes** | Without the entry that folder is carved out of the policy: non-admin and non-elevated code there is blocked in Enforce and logged in Audit. With it, the folder stays allowed for every account |
+| The user accounts in an administrators OU (ten Domain Admins in a `DA` OU, say) | **No** | No permission names them, and as Domain Admins they already count. `-IncludeUsers` exists only for a permission that names a person — rare, and a finding in itself |
+| `Domain Users`, `Domain Computers`, `Authenticated Users`, `Users`, `Everyone`, … | **Never** — refused | Every folder those accounts can write would count as administrators-only, so the policy would allow code from user-writable folders. The script and the settings check both refuse these |
+
+A **missing** entry affects nobody's security: a folder that could have stayed allowed is carved out, so a tool a non-admin runs from there is blocked (Enforce) or logged (Audit). A **wrong** entry affects everyone: a too-broad group widens what non-admins may run. When in doubt, leave a group out.
+
+**How to find out what belongs there** — let the evidence decide, in this order:
+
+1. **Survey the OU that holds your administrator accounts** (without `-IncludeUsers`). The script writes nothing; it prints each account with the groups it belongs to, and those groups are the candidates:
+   ```powershell
+   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'
+   ```
+   ```
+   INFO  User not listed  CONTOSO\jsmith at contoso.com/Domain Administration/.../DA/jsmith - KnownAdmins is for groups (direct member of: Domain Admins, Tier0-Server-Admins). -IncludeUsers lists it anyway.
+   ...
+   Nothing to list: no security group under the given path(s) needs a KnownAdmins entry (10 user account(s) found - KnownAdmins takes groups; see the rows below).
+       KnownAdmins       = @()
+   ```
+2. **Check which of those groups actually hold write access.** `0_AL_pre-flight.ps1` reports `Extra path writable … can be changed by CONTOSO\Tier0-Server-Admins` for `C:\Admin`, and after a build `Outputs\<profile>\<timestamp>\ScanResults\Writable_*.txt` names the trustee behind every carve-out under `C:\Windows` and `Program Files`. A group that appears there **and** is an administrators group belongs in `KnownAdmins`. `Domain Admins` never appears: it already counts.
+3. **Add exactly those groups** — one group by name, or every security group in the OU where you keep them (`-Recurse` adds sub-OUs). The DA OU of *accounts* is not that OU; it is the OU of *groups* (or the group itself):
+   ```powershell
+   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups/Tier0-Server-Admins' -Update
+   .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-Groups' -Recurse -Update
+   ```
+   `-Update` merges with the existing entries (`-Replace` discards them), backs the file up to `Outputs\<profile>\settings-backups` and asks `Continue? [Y/N]` (`-NoConfirm` for automation, `-WhatIf` to see it). Entries are written as `DOMAIN\Name` (`-AsSid` for SIDs); a distinguished name works instead of a canonical name.
+4. **Rebuild** (steps 4–5): the value only applies at the next `1_AL_build_policy.ps1`.
+
+If nothing appears in step 2, leave `KnownAdmins` empty — even with ten accounts in the DA OU.
 
 ---
 
