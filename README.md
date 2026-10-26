@@ -135,15 +135,15 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JMSC-DC-AppLocker - Audit` / `- Enforce` |
+| `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JSLC_AppLocker_AUDIT_Domain_Controller` / `JSLC_AppLocker_ENFORCE_Domain_Controller` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
-| `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4** | empty |
+| `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC25-1.skynet-home.local` (the lab DC) |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
 | `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
 | `EnableDllRules` | `$false` = DLL collection off | `$false` |
-| `EventLogSizesMB` | AppLocker log sizes on the servers | EXE and DLL 100 MB, others 20 MB |
+| `EventLogSizesMB` | AppLocker log sizes on the servers | 100 MB for each of the four logs |
 
 **Several server classes** (DCs, MECM site systems, other servers)? Copy the file (`AL-Settings.mecm.psd1`), change it, and pass **`-SettingsFile`** to every script. Each file keeps its own `Outputs\<profile>` folder and its own GPO pair.
 
@@ -461,8 +461,8 @@ $d.Save('C:\Temp\Audit-Deploy.xml')          # same for the Enforce file
 **3. Create the GPO and write the rules:**
 ```powershell
 $pdc = (Get-ADDomain).PDCEmulator
-Backup-GPO -Name 'JMSC-DC-AppLocker - Audit' -Path C:\Temp\GpoBackup -Server $pdc    # when it already exists
-$gpo = New-GPO -Name 'JMSC-DC-AppLocker - Audit' -Server $pdc                         # or Get-GPO
+Backup-GPO -Name 'JSLC_AppLocker_AUDIT_Domain_Controller' -Path C:\Temp\GpoBackup -Server $pdc    # when it already exists
+$gpo = New-GPO -Name 'JSLC_AppLocker_AUDIT_Domain_Controller' -Server $pdc                         # or Get-GPO
 Set-AppLockerPolicy -XmlPolicy C:\Temp\Audit-Deploy.xml -Ldap "LDAP://$pdc/$($gpo.Path)"
 ```
 **4. Application Identity = Automatic in the GPO** (UTF-16 `GptTmpl.inf` under the GPO's `Machine\Microsoft\Windows NT\SecEdit\`):
@@ -480,8 +480,8 @@ Then add `[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C9
 **5. Link and choose the mode** (disable one link before enabling the other):
 ```powershell
 $ou = (Get-ADDomain).DomainControllersContainer
-New-GPLink -Name 'JMSC-DC-AppLocker - Enforce' -Target $ou -LinkEnabled No
-New-GPLink -Name 'JMSC-DC-AppLocker - Audit'   -Target $ou -LinkEnabled Yes
+New-GPLink -Name 'JSLC_AppLocker_ENFORCE_Domain_Controller' -Target $ou -LinkEnabled No
+New-GPLink -Name 'JSLC_AppLocker_AUDIT_Domain_Controller'   -Target $ou -LinkEnabled Yes
 Invoke-Command -ComputerName dc01 { gpupdate /target:computer /force; Start-Sleep 10; gpupdate /target:computer /force }
 ```
 **6. Check a DC:**

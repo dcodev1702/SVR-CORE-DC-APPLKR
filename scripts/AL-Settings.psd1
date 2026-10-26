@@ -4,8 +4,8 @@
 # Outputs\<profile> folder, so the classes never overwrite each other. The scripts refuse values that would widen the policy.
 @{
     # The two GPOs. Both are linked to every target OU; only one link is enabled at a time (3_AL_set_mode.ps1).
-    AuditGpoName      = 'JMSC-DC-AppLocker - Audit'
-    EnforceGpoName    = 'JMSC-DC-AppLocker - Enforce'
+    AuditGpoName      = 'JSLC_AppLocker_AUDIT_Domain_Controller'
+    EnforceGpoName    = 'JSLC_AppLocker_ENFORCE_Domain_Controller'
 
     # OUs (distinguished names) whose computers receive the policy. Empty = the Domain Controllers OU.
     # Example: @('OU=MECM Servers,OU=Servers,DC=contoso,DC=com')
@@ -14,7 +14,7 @@
     # REQUIRED before 1_AL_build_policy.ps1: the server the baseline is built ON (FQDN), e.g. 'dc01.contoso.com'. It must look like the
     # servers in TargetOUs (same roles, same software, the MECM client and Nessus Agent if they have them) - for the Domain Controllers OU,
     # any DC (the PDC emulator is a good choice). The rules depend on what is on its disk. (Build one policy per server class.)
-    ReferenceServer   = ''
+    ReferenceServer   = 'DC25-1.skynet-home.local'
 
     # Folders or files that every account may run from, outside C:\Windows and C:\Program Files* (admin tools in C:\Admin; programs a
     # non-admin account or a non-elevated session starts). Fixed local or UNC paths only; a folder ends in \*.
@@ -45,5 +45,5 @@
     EnableDllRules    = $false
 
     # AppLocker logs allowed executions too; the 1 MB default wraps in minutes on a busy server. Sizes in MB (1-4096).
-    EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 20; 'Packaged app-Execution' = 20; 'Packaged app-Deployment' = 20 }
+    EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 100; 'Packaged app-Execution' = 100; 'Packaged app-Deployment' = 100 }
 }
