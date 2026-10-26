@@ -1,7 +1,8 @@
-# Step 4 - run from the management computer (Windows PowerShell 5.1). Read-only validation of the AppLocker deployment.
+# Step 4 - run from the management computer (Windows PowerShell 5.1 or PowerShell 7). Read-only validation of the AppLocker deployment.
 # Per OU: both GPOs exist, exactly one link enabled, the rules inside the active GPO have the expected modes.
-# Per server (target OUs, or -ComputerName): Application Identity running + Automatic, effective policy modes, ExtraAllowedPaths still
-# admin-only, sample rule decisions (Windows tools, MECM client files), core DC services, and AppLocker event counts.
+# Per server (target OUs, or -ComputerName): Application Identity running + Automatic, effective policy modes, no local policy or services
+# enforcement mixed in, ExtraAllowedPaths still administrators-only, sample rule decisions (Windows tools, MECM client, Nessus, C:\Admin),
+# core DC services, and AppLocker event counts. Results: console + Logs\4_AL_validate-<ts>.csv.
 # -Mode Auto (default) expects what the enabled link says; Audit / Enforce / Off assert a specific mode. Exit code 1 on a failure.
 param(
     [string]$SettingsFile,
@@ -9,35 +10,43 @@ param(
     [string[]]$TargetOU,
     [string[]]$ComputerName,
     # Event window summarised at the end
-    [int]$EventHours = 24
+    [ValidateRange(1, 8760)][int]$EventHours = 24
 )
 . "$PSScriptRoot\AL-Common.ps1"
 $Cfg = Initialize-AL -ScriptName '4_AL_validate' -SettingsFile $SettingsFile -Overrides @{ TargetOUs = $TargetOU }
 $R = New-ALResults
 $Failed = 1
 
-# Runs on a server
+# Runs on a server. $Extra = the ExtraAllowedPaths setting (a sample file from each is tested).
 $Probe = {
-    param([int]$Hours)
+    param([int]$Hours, [string[]]$Extra)
     $o = [ordered]@{}
     $o.Svc = Get-CimInstance Win32_Service -Filter "Name='AppIDSvc'" | Select-Object State, StartMode
     $o.Policy = [xml](Get-AppLockerPolicy -Effective -Xml)
+    $o.LocalRules = 0
+    try { [xml]$loc = Get-AppLockerPolicy -Local -Xml; $o.LocalRules = @($loc.AppLockerPolicy.RuleCollection.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count } catch { }
+    $o.ServicesEnforcement = (@($o.Policy.AppLockerPolicy.RuleCollection | ForEach-Object { $_.RuleCollectionExtensions.ThresholdExtensions.Services.EnforcementMode } | Where-Object { $_ } | Select-Object -Unique)) -join ','
     $pol = Get-AppLockerPolicy -Effective
     $files = @(
         @{ Path = "$env:windir\System32\cmd.exe"; User = 'Everyone' },
         @{ Path = "$env:windir\System32\cipher.exe"; User = 'Everyone' },
         @{ Path = "$env:windir\System32\cipher.exe"; User = 'BUILTIN\Administrators' }
     )
-    # Configuration Manager client / site server binaries, when present
-    $mecm = @("$env:windir\CCM\CcmExec.exe", "$env:windir\ccmsetup\ccmsetup.exe")
+    # Configuration Manager client / site server and Tenable Nessus binaries, plus one file from each ExtraAllowedPaths folder, when present
+    $more = @("$env:windir\CCM\CcmExec.exe", "$env:windir\ccmsetup\ccmsetup.exe", "$env:ProgramFiles\Tenable\Nessus Agent\nessusd.exe", "$env:ProgramFiles\Tenable\Nessus\nessusd.exe")
     $site = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction SilentlyContinue).'Installation Directory'
-    if ($site) { $mecm += (Join-Path $site 'bin\x64\smsexec.exe') }
-    foreach ($m in $mecm) { if (Test-Path -LiteralPath $m) { $files += @{ Path = $m; User = 'Everyone' }; $files += @{ Path = $m; User = 'BUILTIN\Administrators' } } }
+    if ($site) { $more += (Join-Path $site 'bin\x64\smsexec.exe') }
+    foreach ($e in $Extra) {
+        $dir = $e -replace '\\\*$', ''
+        if (Test-Path -LiteralPath $dir -PathType Container) { $more += @(Get-ChildItem -LiteralPath $dir -Recurse -File -Include *.exe, *.ps1, *.cmd, *.bat -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName }) }
+    }
+    foreach ($m in $more) { if ($m -and (Test-Path -LiteralPath $m)) { $files += @{ Path = $m; User = 'Everyone' }; $files += @{ Path = $m; User = 'BUILTIN\Administrators' } } }
     $o.Tests = foreach ($t in $files) {
         try { $r = Test-AppLockerPolicy -PolicyObject $pol -Path $t.Path -User $t.User; [pscustomobject]@{ File = $t.Path; User = $t.User; Decision = "$($r.PolicyDecision)"; Rule = "$($r.MatchingRule)" } }
         catch { [pscustomobject]@{ File = $t.Path; User = $t.User; Decision = 'ERROR'; Rule = $_.Exception.Message } }
     }
-    $o.Services = foreach ($n in 'NTDS', 'DNS', 'Netlogon', 'KDC', 'DFSR', 'W32Time', 'CcmExec') { $s = Get-Service $n -ErrorAction SilentlyContinue; if ($s) { "$n=$($s.Status)" } }
+    # Core DC services, plus MECM client and Nessus Agent when installed (only services that exist are listed)
+    $o.Services = foreach ($n in 'NTDS', 'DNS', 'Netlogon', 'KDC', 'DFSR', 'W32Time', 'ADWS', 'CcmExec', 'Tenable Nessus Agent') { $s = Get-Service -Name $n -ErrorAction SilentlyContinue; if ($s) { "$n=$($s.Status)" } }
     $since = (Get-Date).AddHours(-$Hours)
     $o.Events = foreach ($log in 'EXE and DLL', 'MSI and Script', 'Packaged app-Execution') {
         $ev = @(Get-WinEvent -FilterHashtable @{ LogName = "Microsoft-Windows-AppLocker/$log"; StartTime = $since } -ErrorAction SilentlyContinue)
@@ -67,7 +76,7 @@ try {
         if ((Test-Path -LiteralPath $Inf) -and ((Get-Content -LiteralPath $Inf -Raw) -match '"AppIDSvc",2')) { Add-ALResult $R 'OK' "$($G[0]) GPO System Services" 'Application Identity = Automatic' } else { Add-ALResult $R 'FAIL' "$($G[0]) GPO System Services" 'AppIDSvc startup setting missing in GptTmpl.inf' }
         [xml]$InGpo = Get-AppLockerPolicy -Domain -Ldap "LDAP://$($Domain.PDC)/$($Gpo.Path)" -Xml
         $Bad = @($InGpo.AppLockerPolicy.RuleCollection | Where-Object { $_.EnforcementMode -ne (Get-Expected $G[0] $_.Type) })
-        $Txt = @($InGpo.AppLockerPolicy.RuleCollection | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)" }) -join ', '
+        $Txt = Get-ALPolicySummary $InGpo
         if ($Bad.Count -eq 0 -and $InGpo.AppLockerPolicy.RuleCollection) { Add-ALResult $R 'OK' "$($G[0]) rules in GPO" $Txt } else { Add-ALResult $R 'FAIL' "$($G[0]) rules in GPO" "unexpected or empty: $Txt" }
     }
 
@@ -84,39 +93,46 @@ try {
     $Expect = if ($Mode -eq 'Auto') { ($Active | Select-Object -Unique) } else { $Mode }
     if (@($Expect).Count -ne 1 -or $Expect -eq 'BOTH') { Add-ALResult $R 'FAIL' 'Mode' "target OUs are not in one consistent mode ($($Active -join ', '))"; $Expect = $null }
     elseif ($Mode -ne 'Auto' -and ($Active | Where-Object { $_ -ne $Mode })) { Add-ALResult $R 'FAIL' 'Mode' "expected $Mode but the links say $($Active -join ', ')" }
-    else { Add-ALResult $R 'INFO' 'Mode asserted' $Expect }
+    else { Add-ALResult $R 'INFO' 'Mode asserted' "$Expect$(if ($Expect -eq 'Enforce') { ' - WN25-00-000080 / V-277992 met' } elseif ($Expect) { ' - WN25-00-000080 / V-277992 NOT met until Enforce' })" }
 
     if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
-    if (-not $ComputerName.Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
+    if (-not @($ComputerName).Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
     foreach ($C in $ComputerName) {
-        try { $Dc = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ArgumentList $EventHours -ErrorAction Stop }
+        try { $Dc = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ArgumentList $EventHours, @($Cfg.ExtraAllowedPaths) -ErrorAction Stop }
         catch { Add-ALResult $R 'FAIL' "WinRM $C" $_.Exception.Message; continue }
         if ($Expect -eq 'Off') {
-            if ($Dc.Policy.AppLockerPolicy.RuleCollection.ChildNodes.Count -gt 0) { Add-ALResult $R 'WARN' "Effective policy $C" 'rules still effective (the server has not refreshed Group Policy yet?)' } else { Add-ALResult $R 'OK' "Effective policy $C" 'none (Off)' }
+            if (@($Dc.Policy.AppLockerPolicy.RuleCollection.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count -gt 0) { Add-ALResult $R 'WARN' "Effective policy $C" 'rules still effective (the server has not refreshed Group Policy yet?)' } else { Add-ALResult $R 'OK' "Effective policy $C" 'none (Off)' }
         }
         else {
             if ($Dc.Svc.State -eq 'Running' -and $Dc.Svc.StartMode -eq 'Auto') { Add-ALResult $R 'OK' "AppIDSvc $C" "$($Dc.Svc.State) / $($Dc.Svc.StartMode)" } else { Add-ALResult $R 'FAIL' "AppIDSvc $C" "$($Dc.Svc.State) / $($Dc.Svc.StartMode) (expected Running / Auto; run gpupdate twice or reboot)" }
             $Cols = @($Dc.Policy.AppLockerPolicy.RuleCollection)
-            $Eff = ($Cols | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)($(@($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' }).Count))" }) -join ', '
+            $Eff = Get-ALPolicySummary $Dc.Policy
             $EffBad = if ($Expect) { @($Cols | Where-Object { $_.EnforcementMode -ne (Get-Expected $Expect $_.Type) }) } else { @() }
             if ($Cols.Count -and $EffBad.Count -eq 0) { Add-ALResult $R 'OK' "Effective policy $C" $Eff } else { Add-ALResult $R 'FAIL' "Effective policy $C" "not applied or unexpected mode: $Eff" }
         }
+        if ($Dc.LocalRules -gt 0) { Add-ALResult $R 'WARN' "Local AppLocker policy $C" "$($Dc.LocalRules) rule(s) in the LOCAL policy merge with the GPO (MECM managed installer? README, MECM)" }
+        if ($Dc.ServicesEnforcement -match 'Enabled') { Add-ALResult $R 'WARN' "Services enforcement $C" 'the effective policy also applies to services (not part of this baseline) - check that no service is blocked' }
         foreach ($T in $Dc.Tests) { Add-ALResult $R 'INFO' "Decision $C" "$($T.User) -> $(Split-Path $T.File -Leaf): $($T.Decision) ($($T.Rule))" }
         $Down = @($Dc.Services | Where-Object { $_ -notmatch '=Running' })
         if ($Down.Count -eq 0) { Add-ALResult $R 'OK' "Services $C" ($Dc.Services -join ', ') } else { Add-ALResult $R 'FAIL' "Services $C" ($Dc.Services -join ', ') }
         if (@($Cfg.ExtraAllowedPaths).Count) {
-            foreach ($Line in @(Invoke-Command -ComputerName $C -ScriptBlock $ALWritableCheck -ArgumentList (, @($Cfg.ExtraAllowedPaths)))) {
-                $F = "$Line" -split '\|'
-                if ($F[0] -eq 'WRITABLE') { Add-ALResult $R 'FAIL' "Extra path writable $C" "$($F[1]) writable by $($F[2]) - bypass risk (0_AL_secure_folders.ps1 -Fix)" }
-                elseif ($F[0] -eq 'NOTFOUND') { Add-ALResult $R 'WARN' "Extra path missing $C" "$($F[1]) does not exist (0_AL_secure_folders.ps1 creates C:\Admin)" }
+            try {
+                foreach ($F in @(Invoke-ALWritableCheck -Paths $Cfg.ExtraAllowedPaths -Cfg $Cfg -ComputerName $C)) {
+                    switch ($F.Kind) {
+                        'WRITABLE' { Add-ALResult $R 'FAIL' "Extra path writable $C" "$($F.Path) can be changed by $($F.Account) - bypass risk (README, C:\Admin)" }
+                        'NOTFOUND' { Add-ALResult $R 'WARN' "Extra path missing $C" "$($F.Path) does not exist (0_AL_secure_folders.ps1 creates C:\Admin administrators-only)" }
+                        default { Add-ALResult $R 'WARN' "Extra path check $C" "$($F.Kind) $($F.Path)" }
+                    }
+                }
             }
+            catch { Add-ALResult $R 'FAIL' "Extra paths $C" "permission check failed: $($_.Exception.Message)" }
         }
         foreach ($E in $Dc.Events) { Add-ALResult $R 'INFO' "Events ${EventHours}h $C" "$($E.Log): $($E.Total) $($E.ById)" }
     }
 }
 catch { Add-ALResult $R 'FAIL' 'Script' $_.Exception.Message }
 finally {
-    $Failed = Write-ALResults $R
+    $Failed = Write-ALResults $R $Cfg 'Validation'
     Stop-ALTranscript
 }
 if ($Failed) { exit 1 }
