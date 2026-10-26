@@ -86,7 +86,8 @@ function Assert-ALSettings($Cfg, [string]$SettingsFile) {
     }
 }
 
-function Stop-ALTranscript { try { Stop-Transcript | Out-Null } catch { } }
+# PowerShell 7's Stop-Transcript honours -WhatIf (5.1's has no such parameter), so the preference is cleared locally instead
+function Stop-ALTranscript { $WhatIfPreference = $false; try { Stop-Transcript | Out-Null } catch { } }
 
 # True when a person can answer Read-Host: an interactive desktop session, not started with -NonInteractive, stdin not redirected
 function Test-ALInteractive {
