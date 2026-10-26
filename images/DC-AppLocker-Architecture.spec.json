@@ -32,7 +32,7 @@
       "accent": "violet", "icon": "server", "title": "DOMAIN CONTROLLERS", "subtitle": "domain controllers ou · server core 2025",
       "sections": [
         { "label": "Role", "text": "Apply the active GPO; Application Identity enforces the rules for code started in a user's context" },
-        { "label": "Every account may run", "dot": "green", "bullets": ["%WINDIR% + %PROGRAMFILES% minus user-writable folders", "C:\\Admin\\* (administrators-only folder)", "SYSVOL · NETLOGON · Defender platform folder", "Microsoft-signed installers and scripts"] },
+        { "label": "Every account may run", "dot": "green", "bullets": ["%WINDIR% + %PROGRAMFILES% minus user-writable folders", "C:\\Admin\\* (administrators-only folder)", "NETLOGON · Defender platform folder (no SYSVOL)", "Microsoft-signed installers and scripts"] },
         { "label": "Denied to non-admins", "dot": "rose", "bullets": ["C:\\Temp, user profiles, everything else", "cipher · runas · WMIC · MSBuild · InstallUtil ..."] },
         { "label": "Not restricted", "dot": "violet", "bullets": ["SYSTEM + elevated administrators", "services: MECM client, Nessus Agent, Defender"] },
         { "label": "UAC", "dot": "amber", "bullets": ["Non-elevated admin sessions get the non-admin rules", "WinRM and Run as administrator are elevated"] }
@@ -61,8 +61,8 @@
       { "accent": "amber", "icon": "clock", "title": "Audit", "subtitle": "3_AL_set_mode -Mode Audit -Refresh", "lines": ["Every collection AuditOnly: logs, blocks nothing", "Leave it for a full patch cycle (2-4 weeks)", "The STIG item stays Open in Audit"], "chips": ["logs only", "Open"] },
       { "accent": "teal", "icon": "log", "title": "Review", "subtitle": "5_AL_review_events.ps1", "lines": ["Would-be-blocked runs by file and account", "Tags: MECM · NESSUS · ADMIN · SYSVOL", "Needed by a non-admin: add a rule, rebuild"], "chips": ["CSV", "read-only"] },
       { "accent": "green", "icon": "check", "title": "Enforce", "subtitle": "3_AL_set_mode -Mode Enforce -Refresh", "lines": ["Every collection Enabled · Dll NotConfigured", "Lab: dcdiag 26/26 passed, 0 blocked events", "WN25-00-000080 / V-277992 NotAFinding"], "chips": ["blocks", "NotAFinding"] },
-      { "accent": "orange", "icon": "flow", "title": "MECM · Nessus", "subtitle": "accounted for", "lines": ["MECM client and Nessus Agent: SYSTEM services", "Credentialed scans use an admin account: allowed", "Keep MECM managed installer off on these DCs"], "chips": ["services", "admins"] },
-      { "accent": "violet", "icon": "shield", "title": "C:\\Admin", "subtitle": "allowed for every account", "lines": ["Must be changeable by administrators only", "Every folder and file checked on each run", "Never allow C:\\Temp or C:\\Sysmon"], "chips": ["admin-only", "checked"] },
+      { "accent": "orange", "icon": "flow", "title": "MECM · Nessus", "subtitle": "accounted for", "lines": ["MECM client and Nessus Agent: SYSTEM services", "Managed installer merges in: DLL audit-only, reported", "Install the Nessus Agent on the reference DC too"], "chips": ["SYSTEM", "MI merged"] },
+      { "accent": "violet", "icon": "shield", "title": "C:\\Admin", "subtitle": "allowed for every account", "lines": ["Checked on every DC at every build", "Non-admin writable: left out or excepted", "Never allow C:\\Temp or C:\\Sysmon"], "chips": ["never breaks", "no ACL changes"] },
       { "accent": "rose", "icon": "undo", "title": "Roll back", "subtitle": "one command", "lines": ["3_AL_set_mode -Mode Audit -Refresh", "-Mode Off removes the rules at the next refresh", "Restore-GPO from Outputs\\...\\gpo-backups"], "chips": ["no reboot", "asks Y/N"] }
     ]
   },

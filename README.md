@@ -44,11 +44,11 @@
 | Who | May run |
 |---|---|
 | **SYSTEM and elevated administrators** | Everything (AppLocker default rule *All files* for `BUILTIN\Administrators`). |
-| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\SYSVOL` / `\\<domain>\NETLOGON`, the Defender platform folder, `C:\Admin\*`, and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`**. |
+| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\NETLOGON`, the Defender platform folder, `C:\Admin\*`, and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`, not `\\<domain>\SYSVOL`**. |
 
 ### Who AppLocker restricts here
 
-- **By default, AppLocker only applies to code running in a user's context.** Services started by the Service Control Manager are **not** evaluated unless the policy turns on *services enforcement*, which this baseline does not ([Microsoft Learn — AppLocker rule collection extensions](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/applocker/rule-collection-extensions)). That is why the MECM client, a Nessus Agent, Defender, Sysmon and the AD DS / DNS / KDC / DFSR services are not affected.
+- **By default, AppLocker only applies to code running in a user's context.** Services started by the Service Control Manager are **not** evaluated unless a policy turns on *services enforcement* ([Microsoft Learn — AppLocker rule collection extensions](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/applocker/rule-collection-extensions)). This baseline does not — but **MECM's managed installer does** (its local policy merges in, [section 9](#9-mecm-configuration-manager)). Either way the MECM client, the Nessus Agent, Defender, Sysmon and the AD DS / DNS / KDC / DFSR services keep running: they run as SYSTEM (administrator rule) or from `C:\Windows` / `Program Files` / the Defender platform folder.
 - A process that a service starts under a **new token** can still be evaluated: the lab logged Defender for Endpoint helpers (`SenseIMDSCollector.exe` as SYSTEM, `SenseNdr.exe` as LOCAL SERVICE) — allowed, because they live in `Program Files`.
 - **UAC matters.** A non-elevated administrator session (UAC filtered token) gets the *non-admin* rules. WinRM / `Invoke-Command` and *Run as administrator* sessions are elevated and match the administrator rule.
 
@@ -59,9 +59,9 @@
 
 | Collection | Mode in Audit / Enforce | Rules | What they are |
 |---|---|---|---|
-| **Exe** | AuditOnly / **Enabled** | 10 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, `\\<domain>\sysvol\*`, Defender platform folder, `C:\Admin\*` · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) |
+| **Exe** | AuditOnly / **Enabled** | 9 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, Defender platform folder, `C:\Admin\*` · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) |
 | **Msi** | AuditOnly / **Enabled** | 5 | `%WINDIR%\ccmcache\*` (MECM), `%WINDIR%\Installer\*`, Administrators: all, Microsoft-signed MSI, Teams |
-| **Script** | AuditOnly / **Enabled** | 9 | Same paths as Exe, Administrators: all, Microsoft-signed scripts, Teams |
+| **Script** | AuditOnly / **Enabled** | 8 | Same paths as Exe, Administrators: all, Microsoft-signed scripts, Teams |
 | **Appx** | AuditOnly / **Enabled** | 1 | All signed packaged apps (default rule) |
 | **Dll** | **NotConfigured** / **NotConfigured** | 0 | **DLL rules off** — not required by the STIG item (`EnableDllRules = $false`) |
 
@@ -77,10 +77,10 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
   scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_AL_stig_check.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
-                   GetSafePathsToAllow.ps1    adds ExtraAllowedPaths (C:\Admin\*)
+                   GetSafePathsToAllow.ps1    NETLOGON only (no SYSVOL) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
-  tests\           Test-AL.ps1 (78 unit tests, no network, both PowerShell editions)
+  tests\           Test-AL.ps1 (95 unit tests, no network, both PowerShell editions; 98 with -BuildFolder)
   images\          architecture diagram (spec, SVG, PNG)
   Outputs\<profile>\<timestamp>\        created by the scripts: rules, scan results, hashes, deploy records, GPO backups
   Logs\                                 created by the scripts: one transcript (+ CSV of results) per run
@@ -125,7 +125,7 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
    Expected: `AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit), SHA-256 843B6B1D...F9F3 (pinned)` and `Toolkit ready`.
 
 > [!TIP]
-> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 78 passed`.
+> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 95 passed`.
 
 ---
 
@@ -138,7 +138,7 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 | `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JMSC-DC-AppLocker - Audit` / `- Enforce` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
 | `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4** | empty |
-| `ExtraAllowedPaths` | Extra folders every account may run from. **Each must be changeable by administrators only** (checked on every run) | `C:\Admin\*` |
+| `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
 | `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — see [section 11](#11-who-counts-as-an-administrator) | empty |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
@@ -162,7 +162,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\<script>.ps1 [paramete
 | 1 | `0_AL_get_toolkit.ps1` | Verifies AaronLocker + AccessChk (signature, 64-bit, pinned SHA-256) | nothing (`-Download` / import only when asked) |
 | 2 | `0_AL_pre-flight.ps1` | Modules, rights, OUs, toolkit, WinRM, language mode, execution policy, existing AppLocker policy, **MECM**, **Nessus**, services/tasks outside the allowed folders, **`C:\Admin` permissions** | read-only |
 | 3 | `0_AL_secure_folders.ps1` | Creates a missing `C:\Admin` administrators-only; reports a writable one | DCs (only a **missing** folder; an existing one only with `-Fix`) |
-| 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC, brings the XML back | temporary folder on the reference DC |
+| 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC, checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back | temporary folder on the reference DC |
 | 5 | `2_AL_create_gpos.ps1` | Backs up, creates/updates the Audit + Enforce GPOs, reads the rules back, links new GPOs **disabled**, sizes the logs | domain (GPOs), DCs (log size) |
 | 6 | `3_AL_set_mode.ps1 -Mode Audit -Refresh` | Enables the Audit link, refreshes the DCs | domain (links) |
 | 6 | `4_AL_validate.ps1` | GPOs, links, rules, service, effective policy, decisions, DC services, `C:\Admin`, events | read-only |
@@ -195,11 +195,12 @@ It must end with **`Pre-flight: PASSED`**. Fix every **FAIL**; read every **WARN
 |---|---|---|
 | `Reference server: not set` | `ReferenceServer` is empty | set it (any DC in scope) |
 | `Execution policy … AllSigned` (FAIL on the reference DC) | AaronLocker cannot run there | [section 3](#3-prerequisites) |
-| `Extra path writable` (FAIL) | An account that is not an administrator can change something in `C:\Admin` — a path rule there is a bypass | remove that access, or list the group in `KnownAdmins` if it **is** an administrators group ([section 8](#cadmin-ctemp-and-csysmon)) |
+| `Extra path writable` (WARN) | An account that is not an administrator can change something in `C:\Admin`. The build will **leave `C:\Admin` out** of the policy (if the folder itself is writable) or **except** that item — the policy never allows it, and nothing breaks | to keep it allowed for everyone: remove that access, or list the group in `KnownAdmins` if it **is** an administrators group ([section 8](#cadmin-ctemp-and-csysmon)) |
 | `Extra path missing` | `C:\Admin` does not exist on that DC | step 3 |
 | `Task outside allowed folders` | A scheduled task runs a program or script from outside the allowed folders as a non-SYSTEM account — **blocked in Enforce** unless that account is an elevated administrator | move the file, or add its folder to `ExtraAllowedPaths` (administrators-only!) |
 | `Service outside allowed folders` (INFO) | A service runs from elsewhere — services are **not** evaluated by this policy | nothing; watch the Audit events for what it starts as a user |
-| `Local AppLocker policy` / `Services enforcement` | A local policy merges with the GPO (typically MECM's managed installer) | [section 9](#9-mecm-configuration-manager) |
+| `MECM managed installer` / `Services enforcement` (INFO) | MECM's managed-installer local policy merges with the GPO — expected | nothing; [section 9](#9-mecm-configuration-manager) |
+| `Local AppLocker policy` (WARN) | Some other local AppLocker policy merges with the GPO | review `Get-AppLockerPolicy -Local -Xml` |
 | `MECM client` / `Tenable Nessus` (INFO) | Found on that DC | sections [9](#9-mecm-configuration-manager) and [10](#10-tenable-nessus) |
 
 ### Step 3 — `C:\Admin`
@@ -220,9 +221,16 @@ It must end with **`Pre-flight: PASSED`**. Fix every **FAIL**; read every **WARN
 .\1_AL_build_policy.ps1                          # uses ReferenceServer
 .\1_AL_build_policy.ps1 -ComputerName dc01.contoso.com
 ```
-What happens: checks AccessChk → copies the toolkit + `Customizations` to `C:\AaronLocker` on the reference DC → **stops if anything in `C:\Admin` can be changed by a non-admin** → runs `Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan` there (a few minutes; AccessChk only **reads** permissions under `C:\Windows` and `Program Files`) → copies the results to `Outputs\<profile>\<timestamp>\` → deletes `C:\AaronLocker`.
+What happens: checks AccessChk → copies the toolkit + `Customizations` to `C:\AaronLocker` on the reference DC → **checks `C:\Admin` on every DC in scope** → runs `Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan` there (a few minutes; AccessChk only **reads** permissions under `C:\Windows` and `Program Files`) → copies the results to `Outputs\<profile>\<timestamp>\` → deletes `C:\AaronLocker`.
 
-Results: `AppLockerRules-<ts>-Audit.xml`, `…-Enforce.xml`, `ScanResults\Writable_*.txt` (the user-writable folders excluded from the allow rules), `build-info.json` (settings + SHA-256 of the rule files). Harmless: `FILE SYSTEM OBJECT DOES NOT EXIST …OneDrive` (a desktop-only sample).
+**`C:\Admin` never breaks the build.** If a non-admin can change `C:\Admin` itself on any DC, the build **leaves it out** of the policy (non-admins and non-elevated sessions can't run from it; elevated administrators still can). If only items inside it are affected, `C:\Admin\*` stays allowed and those items become **exceptions** of the rule. Either way the policy never allows something a non-admin can write, no permission is changed, and the output says exactly what was decided:
+```
+Extra allowed path: C:\Admin\* - allowed for every account (administrators-only on: dc01, dc02)
+Extra allowed path: C:\Admin\* - allowed for every account EXCEPT (non-admins can change these): C:\Admin\Shared\*
+Extra allowed path: C:\Admin\* - LEFT OUT of the policy: changeable by BUILTIN\Users on dc02. ... Fix its permissions and rebuild to allow it.
+```
+
+Results: `AppLockerRules-<ts>-Audit.xml`, `…-Enforce.xml`, `ScanResults\Writable_*.txt` (the user-writable folders excluded from the allow rules), `build-info.json` (settings, the `C:\Admin` decision per entry, SHA-256 of the rule files). Harmless: `FILE SYSTEM OBJECT DOES NOT EXIST …OneDrive` (a desktop-only sample).
 
 > [!NOTE]
 > **Server Core:** several desktop binaries on AaronLocker's deny list (e.g. `mshta.exe`) are not installed, which makes the stock script fail. The `Customizations` overlay lists only files that exist — the scripts apply it automatically; do not edit the toolkit copy.
@@ -243,7 +251,7 @@ It turns each build file into `…-Deploy.xml` (Audit: every collection `AuditOn
 ```
 `-Refresh` runs `gpupdate` twice on each DC (the first refresh starts Application Identity, the second loads the rules). Without it, DCs apply the change at their next refresh (every **5 minutes**) or at boot.
 
-Validation must end with **`Validation: PASSED`**: both GPOs with AD = SYSVOL version, one active link, Application Identity `Running / Auto`, effective policy `Exe/Msi/Script/Appx = AuditOnly`, `Dll = NotConfigured`, DC services running, `C:\Admin` administrators-only.
+Validation must end with **`Validation: PASSED`**: both GPOs with AD = SYSVOL version, one active link, Application Identity `Running / Auto`, effective policy `Exe/Msi/Script/Appx = AuditOnly`, DC services running, nothing in `C:\Admin` that a non-admin can change is still allowed. The DLL and `ManagedInstaller` collections that MECM's managed installer adds are reported (INFO), not judged.
 
 ### Step 7 — The Audit period and review
 
@@ -290,7 +298,7 @@ Per DC: **WN25-00-000080 / V-277992 (CAT II)**, status **NotAFinding** or **Open
 |---|---|
 | AD DS (`NTDS`), DNS, KDC, Netlogon, DFSR (SYSVOL), W32Time, AD Web Services | Services started by the Service Control Manager — not evaluated by this policy; their binaries are in `C:\Windows` anyway |
 | Group Policy processing, startup/shutdown scripts | Run as SYSTEM |
-| Logon scripts | `\\<domain>\NETLOGON` and `\\<domain>\SYSVOL` are allowed for everyone |
+| Logon scripts | `\\<domain>\NETLOGON` is allowed for everyone. **`\\<domain>\SYSVOL` is not** (tightened: members of *Group Policy Creator Owners* can write GPO folders there) — a GPO *user* logon script stored in SYSVOL does not run in a non-elevated session on a DC; keep logon scripts in NETLOGON |
 | Administration (`dcdiag`, `repadmin`, `ntdsutil`, `nltest`, `w32tm`, `gpupdate`, `sconfig`, PowerShell 5.1 and 7) | In `C:\Windows` / `C:\Program Files` — allowed even for non-admins; elevated admins may run anything |
 | Defender / Defender for Endpoint, Sysmon | Services; Defender's platform folder in `ProgramData` is allowed for everyone |
 | Windows Update / patching | Microsoft-signed content in `C:\Windows`, installed as SYSTEM |
@@ -304,7 +312,7 @@ Lab result in **Enforce**: `dcdiag` 26 tests passed, DFSR SYSVOL `Normal`, DNS S
 
 | Folder | In the policy | Requirement |
 |---|---|---|
-| **`C:\Admin`** | **Allowed for every account** (`ExtraAllowedPaths`) — admin tools and scripts work even in a non-elevated session | Must be changeable by **administrators only** — every folder **and file** in it, including permissions that only apply to new files. Pre-flight, build and validate check it on every run; the build **stops** if it is not. Lab: `O:BAG:DUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` (SYSTEM + Administrators, inheritance removed). |
+| **`C:\Admin`** | **Allowed for every account** (`ExtraAllowedPaths`) — admin tools and scripts work even in a non-elevated session | Should be changeable by **administrators only** — every folder **and file** in it, including permissions that only apply to new files. The build checks it on **every DC** and never stops: what a non-admin can change is left out of the policy or excepted ([step 4](#step-4--build-the-baseline)); pre-flight warns ahead; validate fails only if a DC still allows such an item. Lab: `O:BAG:DUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` (SYSTEM + Administrators, inheritance removed). |
 | **`C:\Temp`** | **Not allowed** for non-admins | Users can write there (it inherits `C:\`). Never add it to `ExtraAllowedPaths`. Administrators can still run from it — avoid that on a DC. |
 | **`C:\Sysmon`** | **Not allowed** for non-admins | Sysmon's archive folder (SYSTEM only) holds copies of deleted executables and scripts. Never allow it. The Sysmon service itself is `C:\Windows\Sysmon64.exe` — allowed. |
 
@@ -322,7 +330,16 @@ The toolkit never sets permissions on `C:\Temp` or `C:\Sysmon`, and on `C:\Admin
 - Client files under `C:\Windows\CCM`, `ccmsetup` and `ccmcache` are covered by the Windows rule — except subfolders users can write to, which the build lists (`MECM / Tenable folders that are user-writable`). MSI files in `%WINDIR%\ccmcache` have their own allow rule.
 - What can still be blocked: deployments or configuration items that run **as the logged-on user**, and anything run by a non-admin account. They show up in Audit with the tag `MECM`.
 
-**Managed installer — keep it off for these DCs.** MECM's *managed installer* (an App Control/WDAC feature) writes a **local** AppLocker policy with a `ManagedInstaller` collection and **services enforcement**. Local and GPO policies merge, so services would start being evaluated against this baseline. Pre-flight and validate warn on a local policy or services enforcement; `2_AL_create_gpos.ps1` refuses a build that contains a `ManagedInstaller` collection. Compare sources with `Get-AppLockerPolicy -Local -Xml` vs `-Effective -Xml`.
+**Managed installer (on for the DCs in this environment).** MECM's *managed installer* (an App Control feature) writes a **local** AppLocker policy: a `ManagedInstaller` collection (`CcmExec`, `ccmsetup`), audit-only EXE and DLL collections with a "benign deny" rule, and **services enforcement**. Microsoft designed it to merge with existing AppLocker policies without changing their behavior ([Microsoft Learn — managed installer](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/design/configure-authorized-apps-deployed-with-a-managed-installer)). On these DCs that means:
+
+| Effect of the merge | What the toolkit does |
+|---|---|
+| Exe / Msi / Script / Appx: the **GPO** decides the mode (Group Policy precedence over the local policy) | validate and the STIG check judge exactly these collections |
+| **DLL** collection: audit-only from the local policy, because this baseline leaves DLL rules off — it **blocks nothing** but logs DLL audit warnings (8003) in *EXE and DLL* | validate reports it (INFO); `5_AL_review_events.ps1` counts DLL events and leaves them out of the list (the DCs filter them before sending) |
+| `ManagedInstaller` collection | reported (INFO); the GPOs never contain one (`2_AL_create_gpos.ps1` refuses such a build) |
+| **Services enforcement** on: services are evaluated too | SYSTEM services and services in `C:\Windows`, `Program Files` or the Defender folder stay allowed; pre-flight lists any service at risk as WARN (none on the lab DC) |
+
+Pre-flight and validate recognise the managed-installer policy (INFO); any *other* local AppLocker policy is a WARN. The DLL warnings make the *EXE and DLL* log fill faster: raise `EventLogSizesMB` for it (e.g. 512 MB) if `5_AL_review_events.ps1` should look back further. Compare sources with `Get-AppLockerPolicy -Local -Xml` vs `-Effective -Xml`. If MECM also deploys an **App Control (WDAC) policy** to the DCs, the reference DC must still run PowerShell in `FullLanguage` for the build (pre-flight checks it).
 
 **Site systems** (site server, MP, DP, SUP/WSUS, SQL) are a different server class: give them their own settings file (`AL-Settings.mecm.psd1`), reference server, `TargetOUs` and GPO pair. When MECM or SQL are installed outside `Program Files` (e.g. `D:\Program Files\Microsoft Configuration Manager`), list those folders in `ExtraAllowedPaths` — they must pass the administrators-only check, which may need `KnownAdmins` for your MECM administrators group.
 
@@ -335,12 +352,13 @@ MECM does not manage this policy and needs no client-setting change. The GPO is 
 > [!NOTE]
 > Design analysis — the lab has no Nessus. Confirm it in your Audit period (tag `NESSUS`, or filter by the scan account).
 
+This environment uses the **Nessus Agent on the DCs** (not agentless scans).
+
 | Nessus | Effect of this policy |
 |---|---|
-| **Credentialed (agentless) scans** from a scanner | Run under the scan account. Full Windows credentialed checks need that account in **Administrators** (on DCs: Domain Admins or a group nested in `BUILTIN\Administrators`); what the scan starts on the DC (over SMB, WMI, remote registry) then matches the administrator rule and is **allowed**. Expect bursts of 8002/8005 *allowed* events during scan windows. |
-| A **least-privilege** scan account | Treated as a non-admin: what it starts outside the allowed folders is **blocked in Enforce**. It shows up in Audit under that account — make it an administrator as Tenable requires, or add rules. |
-| **Nessus Agent** on the DCs | A **SYSTEM service** in `C:\Program Files\Tenable\Nessus Agent` — not restricted; its updates run as SYSTEM. Install it on the reference DC too. Pre-flight lists it; validate checks the `Tenable Nessus Agent` service. |
-| **STIG / SCAP audits** run by Nessus | Read the same effective policy as `6_AL_stig_check.ps1`: WN25-00-000080 can only pass while the Enforce GPO is active. |
+| **Nessus Agent** on the DCs | A **SYSTEM service** in `C:\Program Files\Tenable\Nessus Agent`: allowed by the administrator rule (also with MECM's services enforcement on); the processes it starts and its self-updates run as SYSTEM too. **Install it on the reference DC** so the build scans its folders (writable subfolders under `Program Files\Tenable` are excluded for non-admins and listed by the build). Pre-flight lists it, validate checks that the `Tenable Nessus Agent` service runs and how the policy decides on `nessusd.exe`; in Audit, filter on the tag `NESSUS`. |
+| **STIG / SCAP audits** the agent runs | Read the same effective policy as `6_AL_stig_check.ps1`: WN25-00-000080 can only pass while the Enforce GPO is active. |
+| Credentialed (agentless) scans, if ever used | Run under the scan account: an account in **Administrators** (Domain Admins on DCs) matches the administrator rule and is allowed; a least-privilege account gets the non-admin rules and shows up in Audit. |
 
 ---
 
@@ -384,24 +402,23 @@ AaronLocker decides which folders under `C:\Windows` and `Program Files` are *us
 
 ## Appendix A — Lab verification (2026-10-26)
 
-One Windows Server 2025 Datacenter **Server Core** DC (`DC25-1`, PDC emulator, AD DS + DNS + Defender for Endpoint + Sysmon, no MECM, no Nessus), management computer Windows 11 with Windows PowerShell 5.1 and PowerShell 7.6. Each step ran in the edition shown; the read-only checks ran in both.
+One Windows Server 2025 Datacenter **Server Core** DC (`DC25-1`, PDC emulator, AD DS + DNS + Defender for Endpoint + Sysmon; no MECM, no Nessus Agent), management computer Windows 11 with Windows PowerShell 5.1 and PowerShell 7.6. The full cycle ran twice; this is the second run, with the **tightened** baseline (no SYSVOL rule) and `C:\Admin` checked on every DC. Each step ran in the edition shown; the read-only checks ran in both.
 
 | # | Step | Edition | Result |
 |---|---|---|---|
-| 1 | `0_AL_get_toolkit` | 5.1 + 7 | AccessChk 6.15 64-bit, pinned SHA-256 matched |
-| 2 | `0_AL_pre-flight` | 5.1 + 7 | PASSED, 0 warnings |
-| 3 | `0_AL_secure_folders -WhatIf` | 7 | `C:\Admin` administrators-only — nothing to change, no permissions set |
-| 4 | `1_AL_build_policy` | 7 | Exe 10 · Msi 5 · Script 9 · Appx 1 rules; temporary folder removed |
-| 5 | `3_AL_set_mode -Mode Audit -Refresh` | 5.1 | Enforce link disabled, then Audit enabled |
-| 6 | `2_AL_create_gpos` | 7 | Both GPOs backed up, written, read back and verified (Audit v8, Enforce v4) |
-| 7 | `4_AL_validate -Mode Audit` | 5.1 + 7 | PASSED (effective policy AuditOnly, Dll NotConfigured) |
-| 8 | DC functions in Audit + `5_AL_review_events` | 7 / 5.1 | `dcdiag` 26/26; 0 would-be-blocked events |
-| 9 | `3_AL_set_mode -Mode Enforce -Refresh` | 7 | Audit link disabled, then Enforce enabled |
-| 10 | `4_AL_validate -Mode Enforce` | 5.1 + 7 | PASSED (Exe/Msi/Script/Appx Enabled, Dll NotConfigured) |
-| 11 | DC functions in Enforce | 7 | `dcdiag` 26/26; DFSR SYSVOL Normal; DNS SRV, LDAP, Kerberos, SYSVOL/NETLOGON OK; 0 blocked |
-| 12 | `6_AL_stig_check` | 5.1 + 7 | **WN25-00-000080 / V-277992: NotAFinding** |
+| 1 | `0_AL_pre-flight` | 5.1 + 7 | PASSED |
+| 2 | `0_AL_secure_folders -WhatIf` | 5.1 + 7 | `C:\Admin` administrators-only — nothing to change, no permissions set |
+| 3 | `1_AL_build_policy` | 7 | Exe 9 · Msi 5 · Script 8 · Appx 1 rules; only UNC rule `\\<domain>\netlogon\*`; `C:\Admin\*` allowed (administrators-only on every DC) |
+| 4 | `3_AL_set_mode -Mode Audit -Refresh` | 5.1 | Enforce link disabled, then Audit enabled |
+| 5 | `2_AL_create_gpos` | 7 | Both GPOs backed up, written, read back and verified (Audit v10, Enforce v6) |
+| 6 | `4_AL_validate -Mode Audit` | 5.1 + 7 | PASSED |
+| 7 | DC functions in Audit + `5_AL_review_events` | 7 / 5.1 | `dcdiag` 26/26; 0 would-be-blocked events |
+| 8 | `3_AL_set_mode -Mode Enforce -Refresh` | 7 | Audit link disabled, then Enforce enabled |
+| 9 | `4_AL_validate -Mode Enforce` | 5.1 + 7 | PASSED (Exe/Msi/Script/Appx Enabled, Dll NotConfigured) |
+| 10 | DC functions in Enforce | 7 | `dcdiag` 26/26; DFSR SYSVOL Normal; DNS SRV, LDAP, Kerberos, SYSVOL/NETLOGON shares OK; 0 blocked |
+| 11 | `6_AL_stig_check` | 5.1 + 7 | **WN25-00-000080 / V-277992: NotAFinding** |
 
-Also verified: all scripts parse in both editions and are ASCII-only; `tests\Test-AL.ps1` 78/78 in both editions; `-WhatIf` runs and non-interactive runs without `-NoConfirm` changed nothing (state snapshot before = after); the new deploy XML is byte-identical to what the previous version of the scripts deployed.
+Also verified: all scripts parse in both editions and are ASCII-only; `tests\Test-AL.ps1` 98/98 in both editions (incl. the `C:\Admin` leave-out / exception logic and an MECM managed-installer merge); `-WhatIf` runs and non-interactive runs without `-NoConfirm` changed nothing (state snapshot before = after); the deploy XML is byte-identical to what the original scripts deployed.
 
 Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 
@@ -410,6 +427,7 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | `dcdiag`, `repadmin`, `ntdsutil`, `nltest`, `w32tm`, `gpupdate`, `powershell.exe`, `pwsh.exe`, `Sysmon64.exe`, `sconfig.cmd`, Defender `MpCmdRun.exe` | Allowed | Allowed |
 | `cipher.exe`, `runas.exe`, `WMIC.exe` (deny list) | **Denied** | Allowed |
 | `C:\Temp\*.exe`, `C:\Temp\*.ps1` | **Denied** | Allowed |
+| A script in a GPO folder under `\\<domain>\SYSVOL\<domain>\Policies\` | **Denied** (tightened) | Allowed |
 
 **Not verified in the lab:** MECM, Nessus, more than one DC, and a real block of a non-admin logon (no non-admin can log on to the lab DC).
 
@@ -491,11 +509,13 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 | `Cannot find path …\mshta.exe` during the build | The `Customizations` folder is not next to `scripts` |
 | `AccessChk.exe … SHA-256 … does not match the pinned AccessChkSha256` | The file changed or was damaged in transfer. Restore it from the repository, or verify a new one and update the setting ([section 12](#12-ongoing-operations)) |
 | `STOP: no build in …Outputs\…` / build folder not found | Run step 4, or pass `-OutputFolder` |
-| Build stops: *ExtraAllowedPaths entry can be changed by non-admins* | Remove that access, or list the group in `KnownAdmins` if it is an administrators group; never allow a writable folder |
+| Build output: *`C:\Admin\*` - LEFT OUT of the policy* or *… EXCEPT …* | A non-admin can change `C:\Admin` (or items in it) on the DC named. The build continued safely. To allow it again: remove that access (or list the group in `KnownAdmins` if it is an administrators group), then rebuild (steps 4–5) |
+| Validation FAIL: *… AND allowed for every account - a bypass* | A DC's `C:\Admin` became writable **after** the build. Rebuild (steps 4–5): the build excludes it |
+| Many 8003 warnings for `.dll` files in *EXE and DLL* | MECM's managed installer audits DLLs (DLL rules are off in this baseline). Expected; `5_AL_review_events.ps1` counts and skips them; size the log up ([section 9](#9-mecm-configuration-manager)) |
 | `Application Identity` Stopped / Manual after the GPO applied | `gpupdate /force` once or twice, or reboot; `4_AL_validate.ps1`. A GPP *Services* item does **not** work for this protected service — the GPO uses System Services |
 | Effective policy empty after the first refresh | The service had just started: refresh again (`-Refresh` does it twice) |
 | `Both links enabled` | `3_AL_set_mode.ps1 -Mode Audit` (or Enforce) disables one link before enabling the other |
-| `Local AppLocker policy` / `Services enforcement` warning | A local policy merges with the GPO — typically MECM's managed installer ([section 9](#9-mecm-configuration-manager)) |
+| `Local AppLocker policy` warning | A local AppLocker policy that is **not** MECM's managed installer merges with the GPO — review `Get-AppLockerPolicy -Local -Xml` ([section 9](#9-mecm-configuration-manager)) |
 | A script runs in *Constrained Language* in Enforce | It was not allowed for that account (non-admin or non-elevated, outside the allowed folders). Elevate, move it to `C:\Admin`, or add a rule |
 | `STOP: … non-interactive` | The script needs Y/N: run it in a console, or add `-NoConfirm` for automation |
 | WinRM errors | `Enable-PSRemoting` on the DC; firewall 5985; use FQDNs |
@@ -507,10 +527,11 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 - **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class.
 - **Two GPOs, one enabled link**, so Audit and Enforce never merge and switching is one command. Both GPOs carry the full rule set and the service setting.
 - **DLL rules off** — not required by WN25-00-000080; they add overhead and a high rule-maintenance burden. `EnableDllRules = $true` switches them on (`AuditOnly` / `Enabled` like the rest).
-- **No services enforcement** — services are not evaluated (AppLocker's default). Turning it on would need `SystemApps` allowed and a separate Audit cycle.
+- **No services enforcement in this baseline** — services are not evaluated (AppLocker's default) unless MECM's managed installer turns it on through its local policy; the baseline is safe either way on DCs (services run as SYSTEM or from the allowed folders).
 - **AaronLocker is not maintained since 2022.** It only *generates XML*; the deployment (GPO, links, service) is plain Group Policy and `Set-AppLockerPolicy`. Keep each `Outputs\<profile>\<ts>` folder: it is what you tested.
 - **Desktop leftovers** in the baseline (the Microsoft Teams publisher rule, the AaronLocker timestamp rule) are harmless on a DC.
-- **`\\<domain>\SYSVOL\*` is allowed for everyone** (AaronLocker default, for GPO logon scripts). Members of *Group Policy Creator Owners* can write their GPO folders there; keep that group administrators-only (in the lab its only member is `Administrator`).
+- **`\\<domain>\SYSVOL\*` is NOT allowed for everyone** (tightened from AaronLocker's default in the `Customizations` overlay): members of *Group Policy Creator Owners* and delegated GPO editors can write their GPO folders there. NETLOGON stays allowed (administrators-only). A server class that needs SYSVOL can add the share to `ExtraAllowedPaths`; the build then excludes the writable `Policies` folders.
+- **`C:\Admin` never breaks the build**: what a non-admin can change is left out or excepted, on the evidence of every DC in scope — the policy stays safe without anyone changing permissions.
 - **Administrators are allowed everywhere** (AppLocker default rule): this constrains non-admin and non-elevated code, not an administrator.
 - **Audit mode logs allowed executions too**, which is why the logs are enlarged (`EventLogSizesMB`). Forward the AppLocker logs with Windows Event Forwarding / your SIEM if you need history.
 - **Scripts:** Windows PowerShell 5.1 and PowerShell 7, ASCII-only, settings validated before anything runs, changes behind a yellow Y/N gate (`-NoConfirm`, `-WhatIf`), GPO backup before an update, transcripts and CSV results in `Logs\`.
