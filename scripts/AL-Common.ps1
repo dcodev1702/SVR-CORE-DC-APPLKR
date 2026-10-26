@@ -18,11 +18,9 @@ function Test-ALModule([string]$Name) {
     return [bool](Get-Module -ListAvailable -Name $Name)
 }
 
-# Settings (AL-Settings.psd1 or -SettingsFile, then script-parameter overrides), checked before anything runs; folders and transcript
-function Initialize-AL([string]$ScriptName, [hashtable]$Overrides = @{}, [string]$SettingsFile, [switch]$NoTranscript) {
-    if (-not $SettingsFile) { $SettingsFile = Join-Path $PSScriptRoot 'AL-Settings.psd1' }
-    if (-not (Test-Path -LiteralPath $SettingsFile)) { throw "STOP: settings file not found: $SettingsFile" }
-    $Cfg = @{
+# Defaults for every setting a settings file may leave out
+function New-ALDefaultSettings {
+    return @{
         ReferenceServer   = ''
         TargetOUs         = @()
         ExtraAllowedPaths = @()
@@ -32,6 +30,13 @@ function Initialize-AL([string]$ScriptName, [hashtable]$Overrides = @{}, [string
         EnableDllRules    = $false
         EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 20; 'Packaged app-Execution' = 20; 'Packaged app-Deployment' = 20 }
     }
+}
+
+# Settings (AL-Settings.psd1 or -SettingsFile, then script-parameter overrides), checked before anything runs; folders and transcript
+function Initialize-AL([string]$ScriptName, [hashtable]$Overrides = @{}, [string]$SettingsFile, [switch]$NoTranscript) {
+    if (-not $SettingsFile) { $SettingsFile = Join-Path $PSScriptRoot 'AL-Settings.psd1' }
+    if (-not (Test-Path -LiteralPath $SettingsFile)) { throw "STOP: settings file not found: $SettingsFile" }
+    $Cfg = New-ALDefaultSettings
     try { $File = Import-PowerShellDataFile -LiteralPath $SettingsFile -ErrorAction Stop }
     catch { throw "STOP: $SettingsFile could not be read ($($_.Exception.Message)). Fix the file and run again." }
     foreach ($Key in $File.Keys) { $Cfg[$Key] = $File[$Key] }
@@ -77,13 +82,113 @@ function Assert-ALSettings($Cfg, [string]$SettingsFile) {
             throw "STOP: SecureFolders entry '$F' is a system folder. 0_AL_secure_folders.ps1 must never replace its permissions - remove it from SecureFolders."
         }
     }
-    foreach ($K in @($Cfg.KnownAdmins)) { if ("$K" -notmatch '^(S-1-\d+(-\d+)+|[^\\/:*?"<>|]+\\[^\\/:*?"<>|]+)$') { throw "STOP: KnownAdmins entry '$K' must be a SID (S-1-5-21-...) or DOMAIN\Group." } }
+    foreach ($K in @($Cfg.KnownAdmins)) {
+        if ("$K" -notmatch '^(S-1-\d+(-\d+)+|[^\\/:*?"<>|]+\\[^\\/:*?"<>|]+)$') { throw "STOP: KnownAdmins entry '$K' must be a SID (S-1-5-21-...) or DOMAIN\Group." }
+        if (Test-ALNeverAdmin "$K") { throw "STOP: KnownAdmins entry '$K' is not an administrators group. Listing it would make every folder its members can write count as administrators-only and WIDEN the policy - remove it." }
+    }
     if ($Cfg.AccessChkSha256 -and $Cfg.AccessChkSha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'STOP: AccessChkSha256 must be a 64-character SHA-256 hex string (or empty).' }
     foreach ($N in @($Cfg.EventLogSizesMB.Keys)) {
         if ($N -notin 'EXE and DLL', 'MSI and Script', 'Packaged app-Execution', 'Packaged app-Deployment') { throw "STOP: EventLogSizesMB names an unknown AppLocker log '$N'." }
         $V = 0
         if (-not [int]::TryParse("$($Cfg.EventLogSizesMB[$N])", [ref]$V) -or $V -lt 1 -or $V -gt 4096) { throw "STOP: EventLogSizesMB '$N' must be a whole number of MB from 1 to 4096." }
     }
+}
+
+# True for a principal that must never be a KnownAdmins entry - every user, computer or guest would count as an administrator:
+# Everyone, INTERACTIVE, ANONYMOUS LOGON, Authenticated Users, Users, Guests, Pre-Windows 2000 Compatible Access, Remote Desktop
+# Users, and Domain Users / Domain Guests / Domain Computers (RID 513 / 514 / 515) - as a SID or as DOMAIN\Name
+function Test-ALNeverAdmin([string]$Entry) {
+    if ($Entry -match '^S-1-') {
+        if ($Entry -in 'S-1-1-0', 'S-1-5-4', 'S-1-5-7', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-32-546', 'S-1-5-32-554', 'S-1-5-32-555') { return $true }
+        return ($Entry -match '^S-1-5-21-\d+-\d+-\d+-(513|514|515)$')
+    }
+    return ($Entry -match '^[^\\]+\\(Domain Users|Domain Guests|Domain Computers|Users|Guests|Everyone|INTERACTIVE|ANONYMOUS LOGON|Authenticated Users|Pre-Windows 2000 Compatible Access|Remote Desktop Users)$')
+}
+
+# True for a SID that the AaronLocker scan and $ALWritableCheck already treat as an administrator (listing it in KnownAdmins changes
+# nothing): CREATOR OWNER, SERVICE, SYSTEM, LOCAL/NETWORK SERVICE, Administrators, Server/Print/Backup Operators, NT SERVICE\
+# accounts, and the domain's Administrator, Domain Admins and Enterprise Admins (RID 500 / 512 / 519)
+function Test-ALBuiltInAdminSid([string]$Sid) {
+    if ($Sid -in 'S-1-3-0', 'S-1-5-6', 'S-1-5-18', 'S-1-5-19', 'S-1-5-20', 'S-1-5-32-544', 'S-1-5-32-549', 'S-1-5-32-550', 'S-1-5-32-551') { return $true }
+    return ($Sid -like 'S-1-5-80-*' -or $Sid -match '^S-1-5-21-\d+-\d+-\d+-(500|512|519)$')
+}
+
+# A canonical name as Active Directory Users and Computers shows it (contoso.com/Top OU/Sub OU/Name) -> the domain's DNS name and
+# the path segments. A slash inside a name is escaped as \/ there. The domain alone gives no segments.
+function Split-ALCanonicalName([string]$Name) {
+    $Trimmed = "$Name".Trim()
+    if ($Trimmed.EndsWith('/') -and -not $Trimmed.EndsWith('\/')) { $Trimmed = $Trimmed.Substring(0, $Trimmed.Length - 1) }
+    $Parts = @([regex]::Split($Trimmed, '(?<!\\)/') | ForEach-Object { $_ -replace '\\/', '/' })
+    if ($Parts.Count -lt 1 -or @($Parts | Where-Object { "$_".Trim() -eq '' }).Count -or $Parts[0] -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
+        throw "STOP: '$Name' is not a canonical name. Use the form contoso.com/Top OU/Sub OU/Name (as Active Directory Users and Computers shows it) or a distinguished name (OU=...,DC=...)."
+    }
+    return [pscustomobject]@{ Domain = $Parts[0]; Segments = @($Parts | Select-Object -Skip 1) }
+}
+
+# Escapes a value for use inside an LDAP filter (RFC 4515): \ * ( ) and NUL
+function ConvertTo-ALLdapFilterValue([string]$Value) {
+    $Sb = New-Object System.Text.StringBuilder
+    foreach ($C in "$Value".ToCharArray()) {
+        if ($C -eq '\' -or $C -eq '*' -or $C -eq '(' -or $C -eq ')' -or [int]$C -eq 0) { [void]$Sb.Append('\').Append(([int]$C).ToString('x2')) } else { [void]$Sb.Append($C) }
+    }
+    return $Sb.ToString()
+}
+
+# The KnownAdmins entry for a principal: DOMAIN\Name when it is ASCII and passes the settings check, otherwise (or with -AsSid) its SID
+function Get-ALKnownAdminEntry([string]$PrincipalName, [string]$Sid, [switch]$AsSid) {
+    if (-not $AsSid -and $PrincipalName -match '^[^\\/:*?"<>|]+\\[^\\/:*?"<>|]+$' -and $PrincipalName -notmatch '[^\x20-\x7E]') { return $PrincipalName }
+    return $Sid
+}
+
+# "@('A', 'B')" as it is written into a settings file (single quotes doubled); an empty list (or $null) gives "@()"
+function ConvertTo-ALArrayLiteral([string[]]$Values) {
+    $Items = @($Values | Where-Object { $null -ne $_ -and "$_" -ne '' } | ForEach-Object { "'" + ("$_" -replace "'", "''") + "'" })
+    return ('@(' + ($Items -join ', ') + ')')
+}
+
+# Replaces the value of one array setting in a .psd1 in place - comments, layout, line endings and encoding are kept. The new text is
+# proven first (it loads as a data file with exactly that value and passes Assert-ALSettings); the file is not touched otherwise. The
+# original is copied to $BackupFolder before the write, and the written file is read back. Returns Backup / Before / After (SHA-256).
+function Set-ALSettingsArray([string]$SettingsFile, [string]$Key, [string[]]$Values, [string]$BackupFolder) {
+    $Values = @($Values | Where-Object { $null -ne $_ -and "$_" -ne '' } | ForEach-Object { "$_" })
+    $Bytes = [IO.File]::ReadAllBytes($SettingsFile)
+    $Bom = ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF)
+    $Text = (New-Object System.Text.UTF8Encoding $false).GetString($Bytes, $(if ($Bom) { 3 } else { 0 }), $Bytes.Length - $(if ($Bom) { 3 } else { 0 }))
+    $Tokens = $null; $Errors = $null
+    $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$Tokens, [ref]$Errors)
+    if ($Errors.Count) { throw "STOP: $SettingsFile does not parse: $($Errors[0].Message)" }
+    $Table = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] }, $false)
+    if (-not $Table) { throw "STOP: $SettingsFile contains no settings hashtable." }
+    $Pairs = @($Table.KeyValuePairs | Where-Object { $_.Item1 -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.Item1.Value -eq $Key })
+    if ($Pairs.Count -ne 1) { throw "STOP: $SettingsFile must contain exactly one '$Key' entry (found $($Pairs.Count)). Add a line  $Key = @()  and run again." }
+    if (@($Values | Where-Object { $_ -match '[^\x20-\x7E]' }).Count) { throw "STOP: a '$Key' value contains a character outside ASCII; the settings file is ASCII. Use the SID instead." }
+    $Extent = $Pairs[0].Item2.Extent
+    $New = $Text.Substring(0, $Extent.StartOffset) + (ConvertTo-ALArrayLiteral $Values) + $Text.Substring($Extent.EndOffset)
+    $Encoding = New-Object System.Text.UTF8Encoding $Bom
+    # Prove it before the file is touched
+    $Tmp = Join-Path ([IO.Path]::GetTempPath()) ('AL-settings-' + [guid]::NewGuid().ToString('N') + '.psd1')
+    try {
+        [IO.File]::WriteAllText($Tmp, $New, $Encoding)
+        $Check = Import-PowerShellDataFile -LiteralPath $Tmp -ErrorAction Stop
+        if ((@($Check[$Key]) -join "`n") -cne ($Values -join "`n")) { throw "the '$Key' value did not read back as written" }
+        $Cfg = New-ALDefaultSettings
+        foreach ($K in @($Check.Keys)) { $Cfg[$K] = $Check[$K] }
+        Assert-ALSettings $Cfg $SettingsFile
+    }
+    catch {
+        $Msg = "$($_.Exception.Message)"
+        if ($Msg -like 'STOP:*') { throw "$Msg ($SettingsFile was not changed.)" }
+        throw "STOP: the new settings file would not load ($Msg). $SettingsFile was not changed."
+    }
+    finally { Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue -WhatIf:$false }
+    $Before = Get-ALSha256 $SettingsFile
+    New-Item -Path $BackupFolder -ItemType Directory -Force -WhatIf:$false | Out-Null
+    $Backup = Join-Path $BackupFolder ([IO.Path]::GetFileNameWithoutExtension($SettingsFile) + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + [IO.Path]::GetExtension($SettingsFile))
+    Copy-Item -LiteralPath $SettingsFile -Destination $Backup -Force -WhatIf:$false
+    [IO.File]::WriteAllText($SettingsFile, $New, $Encoding)
+    $Verify = Import-PowerShellDataFile -LiteralPath $SettingsFile -ErrorAction Stop
+    if ((@($Verify[$Key]) -join "`n") -cne ($Values -join "`n")) { throw "STOP: $SettingsFile was written but reads back another '$Key' value. Restore the backup: $Backup" }
+    return [pscustomobject]@{ Backup = $Backup; Before = $Before; After = (Get-ALSha256 $SettingsFile) }
 }
 
 # PowerShell 7's Stop-Transcript honours -WhatIf (5.1's has no such parameter), so the preference is cleared locally instead

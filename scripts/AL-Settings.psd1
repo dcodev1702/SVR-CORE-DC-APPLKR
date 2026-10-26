@@ -32,7 +32,9 @@
 
     # Groups (DOMAIN\Name or SID) that are administrators in your organisation although they are not in the built-in Administrators group,
     # e.g. 'CONTOSO\Tier0-Server-Admins'. Their write access does not count as "user-writable" - in AaronLocker's scan and in the
-    # ExtraAllowedPaths check. Empty = only the built-in administrators (README, "Who counts as an administrator").
+    # ExtraAllowedPaths check. Empty = only the built-in administrators (README, "Who counts as an administrator"). Fill it from an OU
+    # or a group with 0_AL_known_admins.ps1 -Path '<canonical name as ADUC shows it>' [-Update]. Never list Domain Users, Authenticated
+    # Users or another group every account belongs to - the scripts refuse those.
     KnownAdmins       = @()
 
     # SHA-256 of the AccessChk.exe that ships in AaronLocker\AaronLocker (Sysinternals AccessChk 6.15, 64-bit). Every script refuses a file

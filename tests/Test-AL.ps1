@@ -27,6 +27,49 @@ try {
     foreach ($F in 'C:\Windows', 'c:\windows\System32', 'C:\Program Files', 'C:\Program Files (x86)\x', 'C:\ProgramData', 'C:\Users\Public', 'C:\', 'C:\Admin\*', 'Admin') { Assert "settings: SecureFolders '$F' refused" (Throws { Assert-ALSettings (With @{ SecureFolders = @($F) }) 'x' }) }
     foreach ($K in 'S-1-5-21-1-2-3-1105', 'CONTOSO\Tier0 Server Admins') { Assert "settings: KnownAdmins '$K' accepted" (-not (Throws { Assert-ALSettings (With @{ KnownAdmins = @($K) }) 'x' } '*')) }
     foreach ($K in 'Tier0Admins', 'S-1-x', 'A\B\C') { Assert "settings: KnownAdmins '$K' refused" (Throws { Assert-ALSettings (With @{ KnownAdmins = @($K) }) 'x' }) }
+    foreach ($K in 'CONTOSO\Domain Users', 'contoso\domain computers', 'CONTOSO\Authenticated Users', 'S-1-5-21-1-2-3-513', 'S-1-5-11', 'S-1-1-0', 'S-1-5-32-545') { Assert "settings: KnownAdmins '$K' (never an administrator) refused" (Throws { Assert-ALSettings (With @{ KnownAdmins = @($K) }) 'x' }) }
+
+    # ---- 0_AL_known_admins.ps1 helpers: canonical names, LDAP escaping, who already counts / never counts, entry format
+    $Cn = Split-ALCanonicalName 'contoso.com/Domain Administration/Admin Groups/Tier0 Admins'
+    Assert 'canonical: domain + segments' ($Cn.Domain -eq 'contoso.com' -and ($Cn.Segments -join '|') -eq 'Domain Administration|Admin Groups|Tier0 Admins')
+    Assert 'canonical: \/ is a slash inside a name' (((Split-ALCanonicalName 'contoso.com/Ops\/Admins/G').Segments -join '|') -eq 'Ops/Admins|G')
+    Assert 'canonical: trailing slash ignored' (((Split-ALCanonicalName 'contoso.com/A/').Segments -join '|') -eq 'A')
+    Assert 'canonical: domain alone has no segments' (@((Split-ALCanonicalName 'contoso.com').Segments).Count -eq 0)
+    foreach ($Bad in '', '/A', 'contoso.com//A', 'con toso/A') { Assert "canonical: '$Bad' refused" (Throws { Split-ALCanonicalName $Bad }) }
+    Assert 'ldap filter: \ * ( ) escaped' ((ConvertTo-ALLdapFilterValue 'a*b(c)d\e') -eq 'a\2ab\28c\29d\5ce')
+    Assert 'ldap filter: plain name unchanged' ((ConvertTo-ALLdapFilterValue 'Admin-User-Accounts') -eq 'Admin-User-Accounts')
+    foreach ($S in 'S-1-5-32-544', 'S-1-5-18', 'S-1-5-21-1-2-3-512', 'S-1-5-21-1-2-3-519', 'S-1-5-21-1-2-3-500', 'S-1-5-80-1-2-3') { Assert "built-in administrator: $S" (Test-ALBuiltInAdminSid $S) }
+    foreach ($S in 'S-1-5-21-1-2-3-1105', 'S-1-5-21-1-2-3-513', 'S-1-5-32-548', 'S-1-5-21-1-2-3-5120') { Assert "not a built-in administrator: $S" (-not (Test-ALBuiltInAdminSid $S)) }
+    foreach ($S in 'S-1-5-21-1-2-3-513', 'S-1-5-21-1-2-3-515', 'S-1-5-11', 'S-1-5-32-554', 'CONTOSO\Domain Users', 'CONTOSO\Everyone') { Assert "never an administrator: $S" (Test-ALNeverAdmin $S) }
+    foreach ($S in 'S-1-5-21-1-2-3-512', 'S-1-5-21-1-2-3-1105', 'S-1-5-21-1-2-3-5130', 'CONTOSO\Domain Admins', 'CONTOSO\Tier0 Users') { Assert "may be an administrator: $S" (-not (Test-ALNeverAdmin $S)) }
+    Assert 'entry: DOMAIN\Name kept' ((Get-ALKnownAdminEntry 'CONTOSO\Tier0 Admins' 'S-1-5-21-1-2-3-1105') -eq 'CONTOSO\Tier0 Admins')
+    Assert 'entry: -AsSid gives the SID' ((Get-ALKnownAdminEntry 'CONTOSO\Tier0 Admins' 'S-1-5-21-1-2-3-1105' -AsSid) -eq 'S-1-5-21-1-2-3-1105')
+    Assert 'entry: a name the settings refuse falls back to the SID' ((Get-ALKnownAdminEntry 'CONTOSO\Tier0/Admins' 'S-1-5-21-1-2-3-1105') -eq 'S-1-5-21-1-2-3-1105')
+    Assert 'entry: a non-ASCII name falls back to the SID' ((Get-ALKnownAdminEntry ('CONTOSO\Admins' + [char]0xE9) 'S-1-5-21-1-2-3-1105') -eq 'S-1-5-21-1-2-3-1105')
+    Assert 'array literal: quotes doubled, empty = @()' ((ConvertTo-ALArrayLiteral @('A\B', "C\O'Brien")) -eq "@('A\B', 'C\O''Brien')" -and (ConvertTo-ALArrayLiteral @()) -eq '@()')
+    Assert 'array literal: $null and empty strings give @()' ((ConvertTo-ALArrayLiteral $null) -eq '@()' -and (ConvertTo-ALArrayLiteral @('', $null)) -eq '@()' -and (ConvertTo-ALArrayLiteral (@(if ($true) { @() }))) -eq '@()')
+
+    # ---- Set-ALSettingsArray on a copy of the real settings file: value in, everything else untouched, proven before written
+    $Psd = Join-Path $Tmp 'AL-Settings.psd1'
+    Copy-Item -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1') -Destination $Psd
+    $Orig = [IO.File]::ReadAllText($Psd)
+    $W = Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Tier0 Admins', "CONTOSO\O'Brien Admins") -BackupFolder (Join-Path $Tmp 'bak')
+    $Now = [IO.File]::ReadAllText($Psd)
+    Assert 'settings write: the value reads back' (((Import-PowerShellDataFile -LiteralPath $Psd).KnownAdmins -join '|') -eq "CONTOSO\Tier0 Admins|CONTOSO\O'Brien Admins")
+    Assert 'settings write: only the KnownAdmins line changed' (($Orig -replace '(?m)^\s*KnownAdmins\s*=.*$', '') -eq ($Now -replace '(?m)^\s*KnownAdmins\s*=.*$', ''))
+    Assert 'settings write: CRLF kept, no BOM' ($Now.Contains("`r`n") -and -not $Now.Contains("`r`r") -and ([IO.File]::ReadAllBytes($Psd)[0] -eq 0x23))
+    Assert 'settings write: backup is the original, hashes recorded' ((Test-Path -LiteralPath $W.Backup) -and (Get-FileHash -LiteralPath $W.Backup).Hash -eq $W.Before -and $W.Before -ne $W.After -and (Get-FileHash -LiteralPath $Psd).Hash -eq $W.After)
+    [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @() -BackupFolder (Join-Path $Tmp 'bak'))
+    Assert 'settings write: an empty list gives @() - the original text back' ([IO.File]::ReadAllText($Psd) -eq $Orig)
+    [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\X') -BackupFolder (Join-Path $Tmp 'bak'))
+    [void](Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values $null -BackupFolder (Join-Path $Tmp 'bak'))
+    Assert 'settings write: $null gives @() too' ([IO.File]::ReadAllText($Psd) -eq $Orig)
+    $Hash = (Get-FileHash -LiteralPath $Psd).Hash
+    Assert 'settings write: a value the settings refuse stops before the file is touched' ((Throws { Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Domain Users') -BackupFolder (Join-Path $Tmp 'bak') }) -and (Get-FileHash -LiteralPath $Psd).Hash -eq $Hash)
+    Assert 'settings write: a non-ASCII value stops' ((Throws { Set-ALSettingsArray -SettingsFile $Psd -Key 'KnownAdmins' -Values @('CONTOSO\Admins' + [char]0xE9) -BackupFolder (Join-Path $Tmp 'bak') }) -and (Get-FileHash -LiteralPath $Psd).Hash -eq $Hash)
+    Assert 'settings write: a missing key stops' (Throws { Set-ALSettingsArray -SettingsFile $Psd -Key 'NoSuchKey' -Values @('A\B') -BackupFolder (Join-Path $Tmp 'bak') })
+    Set-Content -LiteralPath (Join-Path $Tmp 'broken.psd1') -Value '@{ KnownAdmins = @( }'
+    Assert 'settings write: a file that does not parse stops' (Throws { Set-ALSettingsArray -SettingsFile (Join-Path $Tmp 'broken.psd1') -Key 'KnownAdmins' -Values @('A\B') -BackupFolder (Join-Path $Tmp 'bak') })
     Assert 'settings: 64-hex AccessChkSha256 accepted' (-not (Throws { Assert-ALSettings (With @{ AccessChkSha256 = ('A' * 64) }) 'x' } '*'))
     Assert 'settings: short AccessChkSha256 refused' (Throws { Assert-ALSettings (With @{ AccessChkSha256 = ('A' * 63) }) 'x' })
     Assert 'settings: unknown event log refused' (Throws { Assert-ALSettings (With @{ EventLogSizesMB = @{ 'System' = 10 } }) 'x' })
