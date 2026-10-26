@@ -1,0 +1,80 @@
+{
+  "width": 1600,
+  "title": "APPLOCKER ON DOMAIN CONTROLLERS",
+  "subtitle": ["WINDOWS SERVER 2025 CORE", "AARONLOCKER BASELINE", "AUDIT + ENFORCE GPOs", "ONE ENABLED LINK", "NO INTERNET NEEDED"],
+  "description": "A management computer holds the repository with AaronLocker and AccessChk, builds the AppLocker baseline on a reference domain controller over WinRM, and publishes an Audit GPO and an Enforce GPO that are both linked to the Domain Controllers OU with exactly one link enabled. The domain controllers apply the active GPO and the Application Identity service enforces the rules for code started in a user's context, while SYSTEM, elevated administrators and services are not restricted. The lower panel shows the methodology from Audit to Enforce and the DISA STIG outcome for WN25-00-000080 / V-277992.",
+  "badge": { "text": "Verified in the lab · Server Core 2025 DC · Enforce", "color": "green" },
+  "container": { "label": "Disconnected Active Directory domain", "color": "green", "note": "the management computer builds and deploys · Group Policy carries the rules · the DCs enforce" },
+  "cards": [
+    {
+      "accent": "orange", "icon": "terminal", "title": "MANAGEMENT COMPUTER", "subtitle": "PAW / jump host · runs every script",
+      "sections": [
+        { "label": "Role", "text": "Holds this repository and drives the DCs over WinRM and Group Policy; it never needs the Internet" },
+        { "label": "In the repository", "bullets": ["AaronLocker (MIT) + AccessChk 6.15, 64-bit", "AccessChk SHA-256 pinned in the settings", "scripts\\AL-Settings.psd1 · GPOs, OUs, C:\\Admin"] },
+        { "label": "Scripts · run order", "dot": "cyan", "bullets": ["0 get_toolkit · pre-flight · secure_folders", "1 build_policy · on the reference DC", "2 create_gpos · back up, write, read back", "3 set_mode · Audit | Enforce | Off", "4 validate · 5 review_events · 6 stig_check", { "text": "Changes ask Y/N · -NoConfirm · -WhatIf", "dot": "amber" }] },
+        { "label": "Output", "lines": ["`Outputs\\<profile>\\<timestamp>\\`", "rules, scan, SHA-256 records, GPO backups", "Logs\\ · transcripts + CSV results"] }
+      ],
+      "callout": { "kind": "Important", "title": "offline by default", "text": "Nothing is downloaded. AccessChk is checked (Microsoft signature, 64-bit, pinned SHA-256) before every build." },
+      "footer": "PS 5.1 OR 7 · RSAT GP + AD · DOMAIN ADMIN"
+    },
+    {
+      "accent": "blue", "tint": true, "icon": "policy", "title": "GROUP POLICY · SYSVOL", "subtitle": "two GPOs · exactly one link enabled",
+      "sections": [
+        { "label": "Role", "text": "Carries the rules and the service setting; the enabled link decides the mode" },
+        { "label": "Audit GPO", "dot": "amber", "bullets": ["JMSC-DC-AppLocker - Audit", "Exe · Msi · Script · Appx = AuditOnly", "Dll = NotConfigured (DLL rules off)"] },
+        { "label": "Enforce GPO", "dot": "green", "bullets": ["JMSC-DC-AppLocker - Enforce", "Exe · Msi · Script · Appx = Enabled", "Dll = NotConfigured (DLL rules off)"] },
+        { "label": "In both GPOs", "dot": "violet", "bullets": ["AppLocker rules (registry CSE, SrpV2)", "Application Identity = Automatic (GptTmpl.inf)", "Backup-GPO before every update", "Version raised in AD + GPT.INI"] }
+      ],
+      "callout": { "kind": "Critical", "title": "disable before enable", "text": "3_AL_set_mode.ps1 disables the other link first, so Audit and Enforce rules are never merged." },
+      "footer": "BOTH LINKED TO THE DOMAIN CONTROLLERS OU"
+    },
+    {
+      "accent": "violet", "icon": "server", "title": "DOMAIN CONTROLLERS", "subtitle": "domain controllers ou · server core 2025",
+      "sections": [
+        { "label": "Role", "text": "Apply the active GPO; Application Identity enforces the rules for code started in a user's context" },
+        { "label": "Every account may run", "dot": "green", "bullets": ["%WINDIR% + %PROGRAMFILES% minus user-writable folders", "C:\\Admin\\* (administrators-only folder)", "SYSVOL · NETLOGON · Defender platform folder", "Microsoft-signed installers and scripts"] },
+        { "label": "Denied to non-admins", "dot": "rose", "bullets": ["C:\\Temp, user profiles, everything else", "cipher · runas · WMIC · MSBuild · InstallUtil ..."] },
+        { "label": "Not restricted", "dot": "violet", "bullets": ["SYSTEM + elevated administrators", "services: MECM client, Nessus Agent, Defender"] },
+        { "label": "UAC", "dot": "amber", "bullets": ["Non-elevated admin sessions get the non-admin rules", "WinRM and Run as administrator are elevated"] }
+      ],
+      "callout": { "kind": "Critical", "title": "admins are not contained", "text": "Elevated administrators and SYSTEM run anything. The policy constrains non-admin and non-elevated code: keep Tier 0 tight." },
+      "footer": "LAB · DCDIAG 26/26 · 0 BLOCKED IN ENFORCE"
+    }
+  ],
+  "connectors": ["1 build · 2 publish", "3 set mode (links)", "gpupdate · every 5 min"],
+  "bar": {
+    "label": "Domain Controllers OU", "color": "cyan",
+    "title": "TargetOUs in AL-Settings.psd1 · empty = the Domain Controllers OU",
+    "note": "Both GPOs linked · exactly one link enabled · DCs refresh Group Policy every 5 minutes · -Refresh runs gpupdate twice (start Application Identity, then load the rules)",
+    "right": "3_AL_set_mode.ps1 -Mode Audit | Enforce | Off"
+  },
+  "corridor": {
+    "down": { "title": "Policy delivery", "sub": "SYSVOL → DC · Group Policy", "color": "cyan", "chips": ["AppLocker rules", "AppIDSvc Automatic"] },
+    "center": { "title": "AppIDSvc", "sub": "Application Identity · appid.sys" },
+    "up": { "title": "Evidence", "sub": "read back by steps 4, 5 and 6", "color": "violet", "chips": ["8003/8006 audit", "8004/8007 blocked"] }
+  },
+  "panel": {
+    "label": "Methodology + STIG outcome", "color": "blue", "note": "Audit first, Enforce last · what each step proves",
+    "banner": { "icon": "shield", "color": "green", "title": "WN25-00-000080 / V-277992 · CAT II", "sub": "deny-all, permit-by-exception · check: Get-AppLockerPolicy -Effective -XML", "chips": ["Audit: Open", "Enforce: NotAFinding", "6_AL_stig_check.ps1"] },
+    "columns": 3,
+    "cards": [
+      { "accent": "amber", "icon": "clock", "title": "Audit", "subtitle": "3_AL_set_mode -Mode Audit -Refresh", "lines": ["Every collection AuditOnly: logs, blocks nothing", "Leave it for a full patch cycle (2-4 weeks)", "The STIG item stays Open in Audit"], "chips": ["logs only", "Open"] },
+      { "accent": "teal", "icon": "log", "title": "Review", "subtitle": "5_AL_review_events.ps1", "lines": ["Would-be-blocked runs by file and account", "Tags: MECM · NESSUS · ADMIN · SYSVOL", "Needed by a non-admin: add a rule, rebuild"], "chips": ["CSV", "read-only"] },
+      { "accent": "green", "icon": "check", "title": "Enforce", "subtitle": "3_AL_set_mode -Mode Enforce -Refresh", "lines": ["Every collection Enabled · Dll NotConfigured", "Lab: dcdiag 26/26 passed, 0 blocked events", "WN25-00-000080 / V-277992 NotAFinding"], "chips": ["blocks", "NotAFinding"] },
+      { "accent": "orange", "icon": "flow", "title": "MECM · Nessus", "subtitle": "accounted for", "lines": ["MECM client and Nessus Agent: SYSTEM services", "Credentialed scans use an admin account: allowed", "Keep MECM managed installer off on these DCs"], "chips": ["services", "admins"] },
+      { "accent": "violet", "icon": "shield", "title": "C:\\Admin", "subtitle": "allowed for every account", "lines": ["Must be changeable by administrators only", "Every folder and file checked on each run", "Never allow C:\\Temp or C:\\Sysmon"], "chips": ["admin-only", "checked"] },
+      { "accent": "rose", "icon": "undo", "title": "Roll back", "subtitle": "one command", "lines": ["3_AL_set_mode -Mode Audit -Refresh", "-Mode Off removes the rules at the next refresh", "Restore-GPO from Outputs\\...\\gpo-backups"], "chips": ["no reboot", "asks Y/N"] }
+    ]
+  },
+  "legend": [
+    { "label": "Management computer", "color": "orange" },
+    { "label": "Group Policy · SYSVOL", "color": "blue" },
+    { "label": "Domain controllers", "color": "violet" },
+    { "label": "Audit · warnings", "color": "amber", "shape": "dot" },
+    { "label": "Enforce · allowed · PASS", "color": "green", "shape": "dot" },
+    { "label": "Denied · rollback", "color": "rose", "shape": "dot" },
+    { "label": "Policy delivery (down)", "color": "cyan", "shape": "dot" },
+    { "label": "Evidence (up)", "color": "violet", "shape": "dot" }
+  ],
+  "footer": "SVR-CORE-DC-APPLKR · AppLocker on Windows Server 2025 domain controllers · 2026"
+}

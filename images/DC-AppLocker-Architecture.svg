@@ -1,0 +1,316 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1853" width="1600" height="1853" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">APPLOCKER ON DOMAIN CONTROLLERS</title>
+  <desc id="d">A management computer holds the repository with AaronLocker and AccessChk, builds the AppLocker baseline on a reference domain controller over WinRM, and publishes an Audit GPO and an Enforce GPO that are both linked to the Domain Controllers OU with exactly one link enabled. The domain controllers apply the active GPO and the Application Identity service enforces the rules for code started in a user&apos;s context, while SYSTEM, elevated administrators and services are not restricted. The lower panel shows the methodology from Audit to Enforce and the DISA STIG outcome for WN25-00-000080 / V-277992.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#070b16"/><stop offset="0.55" stop-color="#0a0e1a"/><stop offset="1" stop-color="#0b1020"/></linearGradient>
+    <linearGradient id="hostGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#101728" stop-opacity="0.95"/><stop offset="1" stop-color="#0b1020" stop-opacity="0.95"/></linearGradient>
+    <linearGradient id="cardGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#131c31"/><stop offset="1" stop-color="#0c1322"/></linearGradient>
+    <linearGradient id="barGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#083648"/><stop offset="0.5" stop-color="#074156"/><stop offset="1" stop-color="#083648"/></linearGradient>
+    <linearGradient id="panelGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0f1b39"/><stop offset="1" stop-color="#0a1024"/></linearGradient>
+    <linearGradient id="bannerGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1a4234"/><stop offset="0.5" stop-color="#20573e"/><stop offset="1" stop-color="#1a4234"/></linearGradient>
+    <linearGradient id="titleLine" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#00d4ff"/><stop offset="0.5" stop-color="#b660ff"/><stop offset="1" stop-color="#ff5ec4"/></linearGradient>
+    <linearGradient id="cardTint1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#142241"/><stop offset="1" stop-color="#0c1322"/></linearGradient>
+    <linearGradient id="laneDown" gradientUnits="userSpaceOnUse" x1="0" y1="1074" x2="0" y2="1242"><stop offset="0" stop-color="#00d4ff" stop-opacity="0.18"/><stop offset="0.55" stop-color="#00d4ff" stop-opacity="0.75"/><stop offset="1" stop-color="#00d4ff"/></linearGradient><linearGradient id="laneUp" gradientUnits="userSpaceOnUse" x1="0" y1="1242" x2="0" y2="1074"><stop offset="0" stop-color="#b660ff" stop-opacity="0.18"/><stop offset="0.55" stop-color="#b660ff" stop-opacity="0.75"/><stop offset="1" stop-color="#b660ff"/></linearGradient>
+    <filter id="neonGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="arrDown" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="3.6" markerHeight="3.6" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 Z" fill="#00d4ff"/></marker>
+    <marker id="arrUp" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="3.6" markerHeight="3.6" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 Z" fill="#b660ff"/></marker>
+  </defs>
+  <rect width="1600" height="1853" fill="url(#bgGrad)"/>
+  <g stroke="#1a2238" stroke-width="0.5" opacity="0.35"><path d="M0 100 H1600 M0 200 H1600 M0 300 H1600 M0 400 H1600 M0 500 H1600 M0 600 H1600 M0 700 H1600 M0 800 H1600 M0 900 H1600 M0 1000 H1600 M0 1100 H1600 M0 1200 H1600 M0 1300 H1600 M0 1400 H1600 M0 1500 H1600 M0 1600 H1600 M0 1700 H1600 M0 1800 H1600 M100 0 V1853 M200 0 V1853 M300 0 V1853 M400 0 V1853 M500 0 V1853 M600 0 V1853 M700 0 V1853 M800 0 V1853 M900 0 V1853 M1000 0 V1853 M1100 0 V1853 M1200 0 V1853 M1300 0 V1853 M1400 0 V1853 M1500 0 V1853"/></g>
+<text x="40" y="58" fill="#e8eef7" font-size="30" font-weight="700" letter-spacing="0.6">APPLOCKER ON DOMAIN CONTROLLERS</text>
+<text x="40" y="86" fill="#7b8aa6" font-size="14" letter-spacing="1.4">WINDOWS SERVER 2025 CORE · AARONLOCKER BASELINE · AUDIT + ENFORCE GPOs · ONE ENABLED LINK · NO INTERNET NEEDED</text>
+<rect x="40" y="98" width="594" height="3" rx="1.5" fill="url(#titleLine)" />
+<rect x="1129.57" y="40" width="430.44" height="34" rx="17" fill="#0a1124" stroke="#00d4ff" stroke-width="1" stroke-opacity="0.5" />
+<circle cx="1149.57" cy="57" r="5" fill="#4ade80" filter="url(#softGlow)"/>
+<text x="1165.57" y="62" fill="#cfe9ff" font-size="12.5" font-weight="600" letter-spacing="0.8">VERIFIED IN THE LAB · SERVER CORE 2025 DC · ENFORCE</text>
+<rect x="40" y="130" width="1520" height="940" rx="22" fill="url(#hostGrad)" stroke="#2a3450" stroke-width="1.5" />
+<rect x="62" y="152" width="371.9" height="32" rx="6" fill="#0a1124" stroke="#4ade80" stroke-width="1" />
+<circle cx="78" cy="168" r="4" fill="#4ade80" filter="url(#softGlow)"/>
+<text x="94" y="173" fill="#dbf8e6" font-size="13" font-weight="600" letter-spacing="1.2">DISCONNECTED ACTIVE DIRECTORY DOMAIN</text>
+<text x="449.9" y="173" fill="#64748b" font-size="12">the management computer builds and deploys · Group Policy carries the rules · the DCs enforce</text>
+<g transform="translate(62,220)">
+<rect x="0" y="0" width="456" height="625" rx="14" fill="url(#cardGrad)" stroke="#fb923c" stroke-width="1.5" />
+<rect x="0" y="0" width="456" height="6" rx="3" fill="#fb923c" filter="url(#neonGlow)"/>
+<g transform="translate(22,26) scale(1)" fill="none" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x='1' y='4' width='32' height='26' rx='3'/><path d='M7 13 L12 17 L7 21 M15 22 H24'/></g>
+<text x="76" y="42" fill="#e8eef7" font-size="19" font-weight="700">MANAGEMENT COMPUTER</text>
+<text x="76" y="62" fill="#fb923c" font-size="12" font-weight="600" letter-spacing="1.5">PAW / JUMP HOST · RUNS EVERY SCRIPT</text>
+<line x1="22" y1="86" x2="434" y2="86" stroke="#2a3450"/>
+<text x="22" y="106" fill="#94a3b8" font-size="11" letter-spacing="1.2">ROLE</text>
+<text x="22" y="124" fill="#cbd5e1" font-size="13">Holds this repository and drives the DCs over WinRM and Group Policy;</text>
+<text x="22" y="142" fill="#cbd5e1" font-size="13">it never needs the Internet</text>
+<text x="22" y="170" fill="#94a3b8" font-size="11" letter-spacing="1.2">IN THE REPOSITORY</text>
+<circle cx="26" cy="186.5" r="3" fill="#fb923c" />
+<text x="36" y="190" fill="#e2e8f0" font-size="12.5">AaronLocker (MIT) + AccessChk 6.15, 64-bit</text>
+<circle cx="26" cy="206.5" r="3" fill="#fb923c" />
+<text x="36" y="210" fill="#e2e8f0" font-size="12.5">AccessChk SHA-256 pinned in the settings</text>
+<circle cx="26" cy="226.5" r="3" fill="#fb923c" />
+<text x="36" y="230" fill="#e2e8f0" font-size="12.5">scripts\AL-Settings.psd1 · GPOs, OUs, C:\Admin</text>
+<text x="22" y="258" fill="#94a3b8" font-size="11" letter-spacing="1.2">SCRIPTS · RUN ORDER</text>
+<circle cx="26" cy="274.5" r="3" fill="#00d4ff" />
+<text x="36" y="278" fill="#e2e8f0" font-size="12.5">0 get_toolkit · pre-flight · secure_folders</text>
+<circle cx="26" cy="294.5" r="3" fill="#00d4ff" />
+<text x="36" y="298" fill="#e2e8f0" font-size="12.5">1 build_policy · on the reference DC</text>
+<circle cx="26" cy="314.5" r="3" fill="#00d4ff" />
+<text x="36" y="318" fill="#e2e8f0" font-size="12.5">2 create_gpos · back up, write, read back</text>
+<circle cx="26" cy="334.5" r="3" fill="#00d4ff" />
+<text x="36" y="338" fill="#e2e8f0" font-size="12.5">3 set_mode · Audit | Enforce | Off</text>
+<circle cx="26" cy="354.5" r="3" fill="#00d4ff" />
+<text x="36" y="358" fill="#e2e8f0" font-size="12.5">4 validate · 5 review_events · 6 stig_check</text>
+<circle cx="26" cy="374.5" r="3" fill="#fbbf24" />
+<text x="36" y="378" fill="#e2e8f0" font-size="12.5">Changes ask Y/N · -NoConfirm · -WhatIf</text>
+<text x="22" y="406" fill="#94a3b8" font-size="11" letter-spacing="1.2">OUTPUT</text>
+<text x="22" y="426" fill="#a5d8ff" font-size="11.5" font-family="Cascadia Mono, Consolas, Courier New, monospace">Outputs\&lt;profile&gt;\&lt;timestamp&gt;\</text>
+<text x="22" y="446" fill="#c6d0e2" font-size="12.5">rules, scan, SHA-256 records, GPO backups</text>
+<text x="22" y="466" fill="#c6d0e2" font-size="12.5">Logs\ · transcripts + CSV results</text>
+<rect x="22" y="486" width="412" height="59" rx="8" fill="#0a1124" stroke="#fbbf24" stroke-width="1" stroke-opacity="0.55" />
+<text x="38" y="504" fill="#fcd571" font-size="11" font-weight="700" letter-spacing="0.8">IMPORTANT · OFFLINE BY DEFAULT</text>
+<text x="38" y="522" fill="#eee0b8" font-size="11">Nothing is downloaded. AccessChk is checked (Microsoft signature, 64-bit,</text>
+<text x="38" y="537" fill="#eee0b8" font-size="11">pinned SHA-256) before every build.</text>
+<rect x="22" y="561" width="412" height="38" rx="8" fill="#0a1124" stroke="#fb923c" stroke-width="1" stroke-opacity="0.45" />
+<circle cx="40" cy="580" r="4" fill="#fb923c" filter="url(#softGlow)"/>
+<text x="54" y="585" fill="#cfe9ff" font-size="12" font-weight="600">PS 5.1 OR 7 · RSAT GP + AD · DOMAIN ADMIN</text>
+</g>
+<g transform="translate(572,220)">
+<rect x="0" y="0" width="456" height="625" rx="14" fill="url(#cardTint1)" stroke="#3b82f6" stroke-width="1.5" />
+<rect x="0" y="0" width="456" height="6" rx="3" fill="#3b82f6" filter="url(#neonGlow)"/>
+<g transform="translate(22,26) scale(1)" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d='M5 1 H22 L30 9 V33 H5 Z M22 1 V9 H30 M10 16 H25 M10 21 H25 M10 26 H19'/></g>
+<text x="76" y="42" fill="#e8eef7" font-size="19" font-weight="700">GROUP POLICY · SYSVOL</text>
+<text x="76" y="62" fill="#3b82f6" font-size="12" font-weight="600" letter-spacing="1.5">TWO GPOS · EXACTLY ONE LINK ENABLED</text>
+<line x1="22" y1="86" x2="434" y2="86" stroke="#2a3450"/>
+<text x="22" y="106" fill="#94a3b8" font-size="11" letter-spacing="1.2">ROLE</text>
+<text x="22" y="124" fill="#cbd5e1" font-size="13">Carries the rules and the service setting; the enabled link decides the</text>
+<text x="22" y="142" fill="#cbd5e1" font-size="13">mode</text>
+<text x="22" y="170" fill="#94a3b8" font-size="11" letter-spacing="1.2">AUDIT GPO</text>
+<circle cx="26" cy="186.5" r="3" fill="#fbbf24" />
+<text x="36" y="190" fill="#e2e8f0" font-size="12.5">JMSC-DC-AppLocker - Audit</text>
+<circle cx="26" cy="206.5" r="3" fill="#fbbf24" />
+<text x="36" y="210" fill="#e2e8f0" font-size="12.5">Exe · Msi · Script · Appx = AuditOnly</text>
+<circle cx="26" cy="226.5" r="3" fill="#fbbf24" />
+<text x="36" y="230" fill="#e2e8f0" font-size="12.5">Dll = NotConfigured (DLL rules off)</text>
+<text x="22" y="258" fill="#94a3b8" font-size="11" letter-spacing="1.2">ENFORCE GPO</text>
+<circle cx="26" cy="274.5" r="3" fill="#4ade80" />
+<text x="36" y="278" fill="#e2e8f0" font-size="12.5">JMSC-DC-AppLocker - Enforce</text>
+<circle cx="26" cy="294.5" r="3" fill="#4ade80" />
+<text x="36" y="298" fill="#e2e8f0" font-size="12.5">Exe · Msi · Script · Appx = Enabled</text>
+<circle cx="26" cy="314.5" r="3" fill="#4ade80" />
+<text x="36" y="318" fill="#e2e8f0" font-size="12.5">Dll = NotConfigured (DLL rules off)</text>
+<text x="22" y="346" fill="#94a3b8" font-size="11" letter-spacing="1.2">IN BOTH GPOS</text>
+<circle cx="26" cy="362.5" r="3" fill="#b660ff" />
+<text x="36" y="366" fill="#e2e8f0" font-size="12.5">AppLocker rules (registry CSE, SrpV2)</text>
+<circle cx="26" cy="382.5" r="3" fill="#b660ff" />
+<text x="36" y="386" fill="#e2e8f0" font-size="12.5">Application Identity = Automatic (GptTmpl.inf)</text>
+<circle cx="26" cy="402.5" r="3" fill="#b660ff" />
+<text x="36" y="406" fill="#e2e8f0" font-size="12.5">Backup-GPO before every update</text>
+<circle cx="26" cy="422.5" r="3" fill="#b660ff" />
+<text x="36" y="426" fill="#e2e8f0" font-size="12.5">Version raised in AD + GPT.INI</text>
+<rect x="22" y="486" width="412" height="59" rx="8" fill="#0a1124" stroke="#fbbf24" stroke-width="1" stroke-opacity="0.55" />
+<text x="38" y="504" fill="#fcd571" font-size="11" font-weight="700" letter-spacing="0.8">CRITICAL · DISABLE BEFORE ENABLE</text>
+<text x="38" y="522" fill="#eee0b8" font-size="11">3_AL_set_mode.ps1 disables the other link first, so Audit and Enforce rules are</text>
+<text x="38" y="537" fill="#eee0b8" font-size="11">never merged.</text>
+<rect x="22" y="561" width="412" height="38" rx="8" fill="#0a1124" stroke="#3b82f6" stroke-width="1" stroke-opacity="0.45" />
+<circle cx="40" cy="580" r="4" fill="#3b82f6" filter="url(#softGlow)"/>
+<text x="54" y="585" fill="#cfe9ff" font-size="12" font-weight="600">BOTH LINKED TO THE DOMAIN CONTROLLERS OU</text>
+</g>
+<g transform="translate(1082,220)">
+<rect x="0" y="0" width="456" height="625" rx="14" fill="url(#cardGrad)" stroke="#b660ff" stroke-width="1.5" />
+<rect x="0" y="0" width="456" height="6" rx="3" fill="#b660ff" filter="url(#neonGlow)"/>
+<g transform="translate(22,26) scale(1)" fill="none" stroke="#b660ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x='0' y='0' width='34' height='10' rx='2'/><rect x='0' y='14' width='34' height='10' rx='2'/><rect x='0' y='28' width='34' height='10' rx='2'/><circle cx='27' cy='5' r='1.8' fill='#b660ff'/><circle cx='27' cy='19' r='1.8' fill='#b660ff'/><circle cx='27' cy='33' r='1.8' fill='#b660ff'/></g>
+<text x="76" y="42" fill="#e8eef7" font-size="19" font-weight="700">DOMAIN CONTROLLERS</text>
+<text x="76" y="62" fill="#b660ff" font-size="12" font-weight="600" letter-spacing="1.5">DOMAIN CONTROLLERS OU · SERVER CORE 2025</text>
+<line x1="22" y1="86" x2="434" y2="86" stroke="#2a3450"/>
+<text x="22" y="106" fill="#94a3b8" font-size="11" letter-spacing="1.2">ROLE</text>
+<text x="22" y="124" fill="#cbd5e1" font-size="13">Apply the active GPO; Application Identity enforces the rules for code</text>
+<text x="22" y="142" fill="#cbd5e1" font-size="13">started in a user&apos;s context</text>
+<text x="22" y="170" fill="#94a3b8" font-size="11" letter-spacing="1.2">EVERY ACCOUNT MAY RUN</text>
+<circle cx="26" cy="186.5" r="3" fill="#4ade80" />
+<text x="36" y="190" fill="#e2e8f0" font-size="12.5">%WINDIR% + %PROGRAMFILES% minus user-writable folders</text>
+<circle cx="26" cy="206.5" r="3" fill="#4ade80" />
+<text x="36" y="210" fill="#e2e8f0" font-size="12.5">C:\Admin\* (administrators-only folder)</text>
+<circle cx="26" cy="226.5" r="3" fill="#4ade80" />
+<text x="36" y="230" fill="#e2e8f0" font-size="12.5">SYSVOL · NETLOGON · Defender platform folder</text>
+<circle cx="26" cy="246.5" r="3" fill="#4ade80" />
+<text x="36" y="250" fill="#e2e8f0" font-size="12.5">Microsoft-signed installers and scripts</text>
+<text x="22" y="278" fill="#94a3b8" font-size="11" letter-spacing="1.2">DENIED TO NON-ADMINS</text>
+<circle cx="26" cy="294.5" r="3" fill="#fb7185" />
+<text x="36" y="298" fill="#e2e8f0" font-size="12.5">C:\Temp, user profiles, everything else</text>
+<circle cx="26" cy="314.5" r="3" fill="#fb7185" />
+<text x="36" y="318" fill="#e2e8f0" font-size="12.5">cipher · runas · WMIC · MSBuild · InstallUtil ...</text>
+<text x="22" y="346" fill="#94a3b8" font-size="11" letter-spacing="1.2">NOT RESTRICTED</text>
+<circle cx="26" cy="362.5" r="3" fill="#b660ff" />
+<text x="36" y="366" fill="#e2e8f0" font-size="12.5">SYSTEM + elevated administrators</text>
+<circle cx="26" cy="382.5" r="3" fill="#b660ff" />
+<text x="36" y="386" fill="#e2e8f0" font-size="12.5">services: MECM client, Nessus Agent, Defender</text>
+<text x="22" y="414" fill="#94a3b8" font-size="11" letter-spacing="1.2">UAC</text>
+<circle cx="26" cy="430.5" r="3" fill="#fbbf24" />
+<text x="36" y="434" fill="#e2e8f0" font-size="12.5">Non-elevated admin sessions get the non-admin rules</text>
+<circle cx="26" cy="450.5" r="3" fill="#fbbf24" />
+<text x="36" y="454" fill="#e2e8f0" font-size="12.5">WinRM and Run as administrator are elevated</text>
+<rect x="22" y="486" width="412" height="59" rx="8" fill="#0a1124" stroke="#fbbf24" stroke-width="1" stroke-opacity="0.55" />
+<text x="38" y="504" fill="#fcd571" font-size="11" font-weight="700" letter-spacing="0.8">CRITICAL · ADMINS ARE NOT CONTAINED</text>
+<text x="38" y="522" fill="#eee0b8" font-size="11">Elevated administrators and SYSTEM run anything. The policy constrains</text>
+<text x="38" y="537" fill="#eee0b8" font-size="11">non-admin and non-elevated code: keep Tier 0 tight.</text>
+<rect x="22" y="561" width="412" height="38" rx="8" fill="#0a1124" stroke="#b660ff" stroke-width="1" stroke-opacity="0.45" />
+<circle cx="40" cy="580" r="4" fill="#b660ff" filter="url(#softGlow)"/>
+<text x="54" y="585" fill="#cfe9ff" font-size="12" font-weight="600">LAB · DCDIAG 26/26 · 0 BLOCKED IN ENFORCE</text>
+</g>
+<path d="M290 845 V905" stroke="#fb923c" stroke-width="2" stroke-dasharray="4 4" opacity="0.75" fill="none"/>
+<circle cx="290" cy="845" r="5" fill="#0a0e1a" stroke="#fb923c" stroke-width="2" />
+<text x="302" y="879" fill="#7b8aa6" font-size="11" font-weight="600" letter-spacing="0.4">1 build · 2 publish</text>
+<path d="M800 845 V905" stroke="#3b82f6" stroke-width="2" stroke-dasharray="4 4" opacity="0.75" fill="none"/>
+<circle cx="800" cy="845" r="5" fill="#0a0e1a" stroke="#3b82f6" stroke-width="2" />
+<text x="812" y="879" fill="#7b8aa6" font-size="11" font-weight="600" letter-spacing="0.4">3 set mode (links)</text>
+<path d="M1310 845 V905" stroke="#b660ff" stroke-width="2" stroke-dasharray="4 4" opacity="0.75" fill="none"/>
+<circle cx="1310" cy="845" r="5" fill="#0a0e1a" stroke="#b660ff" stroke-width="2" />
+<text x="1322" y="879" fill="#7b8aa6" font-size="11" font-weight="600" letter-spacing="0.4">gpupdate · every 5 min</text>
+<rect x="120" y="905" width="1360" height="95" rx="14" fill="url(#barGrad)" stroke="#00d4ff" stroke-width="1.5" filter="url(#softGlow)"/>
+<rect x="160" y="930" width="250.06" height="32" rx="6" fill="#0a1124" stroke="#00d4ff" stroke-width="1" />
+<circle cx="176" cy="946" r="4" fill="#00d4ff" filter="url(#softGlow)"/>
+<text x="192" y="951" fill="#ccf6ff" font-size="13" font-weight="600" letter-spacing="1.4">DOMAIN CONTROLLERS OU</text>
+<text x="470.06" y="941" fill="#bff4ff" font-size="13" font-weight="600">TargetOUs in AL-Settings.psd1 · empty = the Domain Controllers OU</text>
+<text x="470.06" y="960" fill="#51b9d8" font-size="11">Both GPOs linked · exactly one link enabled · DCs refresh Group Policy every 5 minutes · -Refresh runs gpupdate twice (start Application</text>
+<text x="470.06" y="975" fill="#51b9d8" font-size="11">Identity, then load the rules)</text>
+<rect x="1169.59" y="930" width="290.41" height="32" rx="6" fill="#0a1124" stroke="#00d4ff" stroke-width="1" stroke-opacity="0.6" />
+<text x="1183.59" y="950" fill="#bff4ff" font-size="12" font-weight="600">3_AL_set_mode.ps1 -Mode Audit | Enforce | Off</text>
+<rect x="380" y="1084" width="844" height="148" rx="16" fill="#080d1b" stroke="#1c2740" stroke-width="1" fill-opacity="0.55"/>
+<circle cx="700" cy="1070" r="5.5" fill="#0a0e1a" stroke="#00d4ff" stroke-width="2.5" />
+<line x1="700" y1="1074" x2="700" y2="1238" stroke="#00d4ff" stroke-width="15" opacity="0.12" stroke-linecap="round"/>
+<line x1="700" y1="1074" x2="700" y2="1242" stroke="url(#laneDown)" stroke-width="5" stroke-dasharray="10 7" marker-end="url(#arrDown)"/>
+<text x="660" y="1118" fill="#80eaff" font-size="13" font-weight="700" letter-spacing="0.4" text-anchor="end">POLICY DELIVERY</text>
+<text x="660" y="1136" fill="#3c9ab9" font-size="10.5" text-anchor="end">SYSVOL → DC · Group Policy</text>
+<rect x="465" y="1148" width="84.88" height="20" rx="10" fill="#0a1124" stroke="#00d4ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="507.44" y="1161.42" fill="#73e7ff" font-size="9.5" text-anchor="middle">AppLocker rules</text>
+<rect x="555.88" y="1148" width="103.79" height="20" rx="10" fill="#0a1124" stroke="#00d4ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="607.77" y="1161.42" fill="#73e7ff" font-size="9.5" text-anchor="middle">AppIDSvc Automatic</text>
+<rect x="724.5" y="1126" width="151" height="48" rx="10" fill="#0a1124" stroke="#3b82f6" stroke-width="1" stroke-opacity="0.55" />
+<circle cx="743.5" cy="1144" r="3.5" fill="#80eaff" filter="url(#softGlow)"/>
+<text x="755.5" y="1148" fill="#cfe9ff" font-size="10.5" font-weight="600" letter-spacing="0.9">AppIDSvc</text>
+<text x="800" y="1165" fill="#64748b" font-size="9.5" text-anchor="middle">Application Identity · appid.sys</text>
+<circle cx="900" cy="1246" r="5.5" fill="#0a0e1a" stroke="#b660ff" stroke-width="2.5" />
+<line x1="900" y1="1242" x2="900" y2="1078" stroke="#b660ff" stroke-width="15" opacity="0.12" stroke-linecap="round"/>
+<line x1="900" y1="1242" x2="900" y2="1074" stroke="url(#laneUp)" stroke-width="5" stroke-dasharray="10 7" marker-end="url(#arrUp)"/>
+<text x="940" y="1118" fill="#d7a8ff" font-size="13" font-weight="700" letter-spacing="0.4">EVIDENCE</text>
+<text x="940" y="1136" fill="#8d6ac5" font-size="10.5">read back by steps 4, 5 and 6</text>
+<rect x="940" y="1148" width="87.07" height="20" rx="10" fill="#0a1124" stroke="#b660ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="983.53" y="1161.42" fill="#d7a8ff" font-size="9.5" text-anchor="middle">8003/8006 audit</text>
+<rect x="1033.07" y="1148" width="98.66" height="20" rx="10" fill="#0a1124" stroke="#b660ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="1082.39" y="1161.42" fill="#d7a8ff" font-size="9.5" text-anchor="middle">8004/8007 blocked</text>
+<rect x="80" y="1246" width="1440" height="483" rx="18" fill="url(#panelGrad)" stroke="#3b82f6" stroke-width="1.5" opacity="0.98"/>
+<g stroke="#6ca1f8" stroke-width="2" opacity="0.7" fill="none"><path d="M80 1274 V1246 H108"/><path d="M1520 1274 V1246 H1492"/><path d="M80 1701 V1729 H108"/><path d="M1520 1701 V1729 H1492"/></g>
+<rect x="110" y="1266" width="293.75" height="32" rx="6" fill="#0a1124" stroke="#3b82f6" stroke-width="1" />
+<circle cx="126" cy="1282" r="4" fill="#3b82f6" filter="url(#softGlow)"/>
+<text x="142" y="1287" fill="#d8e6fd" font-size="13" font-weight="600" letter-spacing="1.2">METHODOLOGY + STIG OUTCOME</text>
+<text x="419.75" y="1287" fill="#64748b" font-size="12">Audit first, Enforce last · what each step proves</text>
+<rect x="110" y="1316" width="1380" height="54" rx="10" fill="url(#bannerGrad)" stroke="#4ade80" stroke-width="1.5" filter="url(#softGlow)"/>
+<g transform="translate(132,1327) scale(0.9)" fill="none" stroke="#9bedb9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d='M17 1 L32 7 V19 C32 27 25 32 17 33 C9 32 2 27 2 19 V7 Z'/><path d='M10 17 L15 22 L24 12'/></g>
+<text x="178" y="1340" fill="#e8eef7" font-size="17" font-weight="700">WN25-00-000080 / V-277992 · CAT II</text>
+<text x="178" y="1360" fill="#6bc399" font-size="12" letter-spacing="0.8">deny-all, permit-by-exception · check: Get-AppLockerPolicy -Effective -XML</text>
+<rect x="1138" y="1330" width="75.86" height="26" rx="13" fill="#0a1124" stroke="#4ade80" stroke-width="1" stroke-opacity="0.5" />
+<text x="1175.93" y="1346.96" fill="#cbd5e1" font-size="11" text-anchor="middle">Audit: Open</text>
+<rect x="1221.86" y="1330" width="120.85" height="26" rx="13" fill="#0a1124" stroke="#4ade80" stroke-width="1" stroke-opacity="0.5" />
+<text x="1282.29" y="1346.96" fill="#cbd5e1" font-size="11" text-anchor="middle">Enforce: NotAFinding</text>
+<rect x="1350.71" y="1330" width="114.91" height="26" rx="13" fill="#0a1124" stroke="#4ade80" stroke-width="1" stroke-opacity="0.5" />
+<text x="1408.17" y="1346.96" fill="#cbd5e1" font-size="11" text-anchor="middle">6_AL_stig_check.ps1</text>
+<g transform="translate(110,1386)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#fbbf24" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#fbbf24" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#fbbf24" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><circle cx='17' cy='17' r='15'/><path d='M17 8 V17 L23 21'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">Audit</text>
+<text x="46" y="46" fill="#fdd97c" font-size="8.5" letter-spacing="0.6">3_AL_SET_MODE -MODE AUDIT -REFRESH</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">Every collection AuditOnly: logs, blocks nothing</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">Leave it for a full patch cycle (2-4 weeks)</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">The STIG item stays Open in Audit</text>
+<rect x="173.83" y="126" width="55.72" height="20" rx="10" fill="#0a1124" stroke="#fbbf24" stroke-width="1" stroke-opacity="0.5" />
+<text x="201.69" y="139.42" fill="#fddc87" font-size="9.5" text-anchor="middle">logs only</text>
+<rect x="233.55" y="126" width="40.9" height="20" rx="10" fill="#0a1124" stroke="#fbbf24" stroke-width="1" stroke-opacity="0.5" />
+<text x="254" y="139.42" fill="#fddc87" font-size="9.5" text-anchor="middle">Open</text>
+</g>
+<g transform="translate(575.67,1386)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#22d3ee" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#22d3ee" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#22d3ee" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><rect x='4' y='1' width='26' height='32' rx='3'/><path d='M10 9 H24 M10 15 H24 M10 21 H24 M10 27 H18'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">Review</text>
+<text x="46" y="46" fill="#7ae5f5" font-size="8.5" letter-spacing="0.6">5_AL_REVIEW_EVENTS.PS1</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">Would-be-blocked runs by file and account</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">Tags: MECM · NESSUS · ADMIN · SYSVOL</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">Needed by a non-admin: add a rule, rebuild</text>
+<rect x="175.83" y="126" width="34.91" height="20" rx="10" fill="#0a1124" stroke="#22d3ee" stroke-width="1" stroke-opacity="0.5" />
+<text x="193.29" y="139.42" fill="#85e7f6" font-size="9.5" text-anchor="middle">CSV</text>
+<rect x="214.74" y="126" width="57.9" height="20" rx="10" fill="#0a1124" stroke="#22d3ee" stroke-width="1" stroke-opacity="0.5" />
+<text x="243.69" y="139.42" fill="#85e7f6" font-size="9.5" text-anchor="middle">read-only</text>
+</g>
+<g transform="translate(1041.33,1386)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#4ade80" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#4ade80" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#4ade80" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><rect x='5' y='4' width='24' height='29' rx='3'/><rect x='12' y='1' width='10' height='6' rx='2'/><path d='M11 19 L15 23 L23 14'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">Enforce</text>
+<text x="46" y="46" fill="#92ebb3" font-size="8.5" letter-spacing="0.6">3_AL_SET_MODE -MODE ENFORCE -REFRESH</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">Every collection Enabled · Dll NotConfigured</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">Lab: dcdiag 26/26 passed, 0 blocked events</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">WN25-00-000080 / V-277992 NotAFinding</text>
+<rect x="164.83" y="126" width="44.41" height="20" rx="10" fill="#0a1124" stroke="#4ade80" stroke-width="1" stroke-opacity="0.5" />
+<text x="187.04" y="139.42" fill="#9bedb9" font-size="9.5" text-anchor="middle">blocks</text>
+<rect x="213.24" y="126" width="70.73" height="20" rx="10" fill="#0a1124" stroke="#4ade80" stroke-width="1" stroke-opacity="0.5" />
+<text x="248.61" y="139.42" fill="#9bedb9" font-size="9.5" text-anchor="middle">NotAFinding</text>
+</g>
+<g transform="translate(110,1561)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#fb923c" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#fb923c" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#fb923c" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><circle cx='6' cy='17' r='4'/><circle cx='28' cy='17' r='4'/><path d='M10 17 H22 M18 13 L22 17 L18 21'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">MECM · Nessus</text>
+<text x="46" y="46" fill="#fdbe8a" font-size="8.5" letter-spacing="0.6">ACCOUNTED FOR</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">MECM client and Nessus Agent: SYSTEM services</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">Credentialed scans use an admin account: allowed</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">Keep MECM managed installer off on these DCs</text>
+<rect x="172.83" y="126" width="50.59" height="20" rx="10" fill="#0a1124" stroke="#fb923c" stroke-width="1" stroke-opacity="0.5" />
+<text x="198.13" y="139.42" fill="#fdc394" font-size="9.5" text-anchor="middle">services</text>
+<rect x="227.42" y="126" width="48.4" height="20" rx="10" fill="#0a1124" stroke="#fb923c" stroke-width="1" stroke-opacity="0.5" />
+<text x="251.62" y="139.42" fill="#fdc394" font-size="9.5" text-anchor="middle">admins</text>
+</g>
+<g transform="translate(575.67,1561)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#b660ff" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#b660ff" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#b660ff" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><path d='M17 1 L32 7 V19 C32 27 25 32 17 33 C9 32 2 27 2 19 V7 Z'/><path d='M10 17 L15 22 L24 12'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">C:\Admin</text>
+<text x="46" y="46" fill="#d3a0ff" font-size="8.5" letter-spacing="0.6">ALLOWED FOR EVERY ACCOUNT</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">Must be changeable by administrators only</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">Every folder and file checked on each run</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">Never allow C:\Temp or C:\Sysmon</text>
+<rect x="163.33" y="126" width="65.6" height="20" rx="10" fill="#0a1124" stroke="#b660ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="196.13" y="139.42" fill="#d7a8ff" font-size="9.5" text-anchor="middle">admin-only</text>
+<rect x="232.93" y="126" width="52.2" height="20" rx="10" fill="#0a1124" stroke="#b660ff" stroke-width="1" stroke-opacity="0.5" />
+<text x="259.03" y="139.42" fill="#d7a8ff" font-size="9.5" text-anchor="middle">checked</text>
+</g>
+<g transform="translate(1041.33,1561)">
+<rect x="0" y="0" width="448.67" height="158" rx="12" fill="#0d1426" stroke="#fb7185" stroke-width="1.4" />
+<rect x="0" y="0" width="448.67" height="5" rx="2.5" fill="#fb7185" filter="url(#softGlow)"/>
+<g transform="translate(14,16) scale(0.65)" fill="none" stroke="#fb7185" stroke-width="2.77" stroke-linecap="round" stroke-linejoin="round"><path d='M11 6 L4 13 L11 20 M4 13 H21 A9 9 0 0 1 21 31 H14'/></g>
+<text x="46" y="30" fill="#e8eef7" font-size="14" font-weight="700">Roll back</text>
+<text x="46" y="46" fill="#fdaab6" font-size="8.5" letter-spacing="0.6">ONE COMMAND</text>
+<text x="14" y="72" fill="#cbd5e1" font-size="10.5">3_AL_set_mode -Mode Audit -Refresh</text>
+<text x="14" y="90" fill="#cbd5e1" font-size="10.5">-Mode Off removes the rules at the next refresh</text>
+<text x="14" y="108" fill="#cbd5e1" font-size="10.5">Restore-GPO from Outputs\...\gpo-backups</text>
+<rect x="165.33" y="126" width="59.42" height="20" rx="10" fill="#0a1124" stroke="#fb7185" stroke-width="1" stroke-opacity="0.5" />
+<text x="195.04" y="139.42" fill="#fdb1bc" font-size="9.5" text-anchor="middle">no reboot</text>
+<rect x="228.75" y="126" width="54.1" height="20" rx="10" fill="#0a1124" stroke="#fb7185" stroke-width="1" stroke-opacity="0.5" />
+<text x="255.8" y="139.42" fill="#fdb1bc" font-size="9.5" text-anchor="middle">asks Y/N</text>
+</g>
+<text x="60" y="1769" fill="#94a3b8" font-size="11" letter-spacing="2">LEGEND</text>
+<rect x="60" y="1781" width="14" height="14" rx="3" fill="#fb923c" />
+<text x="82" y="1792" fill="#cbd5e1" font-size="12">Management computer</text>
+<rect x="246.8" y="1781" width="14" height="14" rx="3" fill="#3b82f6" />
+<text x="268.8" y="1792" fill="#cbd5e1" font-size="12">Group Policy · SYSVOL</text>
+<rect x="426.88" y="1781" width="14" height="14" rx="3" fill="#b660ff" />
+<text x="448.88" y="1792" fill="#cbd5e1" font-size="12">Domain controllers</text>
+<circle cx="596.56" cy="1788" r="5" fill="#fbbf24" />
+<text x="611.56" y="1792" fill="#cbd5e1" font-size="12">Audit · warnings</text>
+<circle cx="743.76" cy="1788" r="5" fill="#4ade80" />
+<text x="758.76" y="1792" fill="#cbd5e1" font-size="12">Enforce · allowed · PASS</text>
+<circle cx="931.88" cy="1788" r="5" fill="#fb7185" />
+<text x="946.88" y="1792" fill="#cbd5e1" font-size="12">Denied · rollback</text>
+<circle cx="1082.08" cy="1788" r="5" fill="#00d4ff" />
+<text x="1097.08" y="1792" fill="#cbd5e1" font-size="12">Policy delivery (down)</text>
+<circle cx="1258.92" cy="1788" r="5" fill="#b660ff" />
+<text x="1273.92" y="1792" fill="#cbd5e1" font-size="12">Evidence (up)</text>
+<text x="1550" y="1829" fill="#475569" font-size="10" letter-spacing="1.5" text-anchor="end">SVR-CORE-DC-APPLKR · AppLocker on Windows Server 2025 domain controllers · 2026</text>
+</svg>
