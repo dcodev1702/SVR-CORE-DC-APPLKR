@@ -140,7 +140,7 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 | `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC25-1.skynet-home.local` (the lab DC) |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
-| `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
+| `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | `SKYNET\lorenzo` (the lab's DA account; replace with your groups) |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
 | `EnableDllRules` | `$false` = DLL collection off | `$false` |
 | `EventLogSizesMB` | AppLocker log sizes on the servers | 100 MB for each of the four logs |

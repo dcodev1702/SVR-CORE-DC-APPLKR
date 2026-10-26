@@ -35,7 +35,7 @@
     # ExtraAllowedPaths check. Empty = only the built-in administrators (README, "Who counts as an administrator"). Fill it from an OU
     # or a group with 0_AL_known_admins.ps1 -Path '<canonical name as ADUC shows it>' [-Update]. Never list Domain Users, Authenticated
     # Users or another group every account belongs to - the scripts refuse those.
-    KnownAdmins       = @()
+    KnownAdmins       = @('SKYNET\lorenzo')
 
     # SHA-256 of the AccessChk.exe that ships in AaronLocker\AaronLocker (Sysinternals AccessChk 6.15, 64-bit). Every script refuses a file
     # with another hash. When you replace AccessChk, verify the new file (README, "Updating AccessChk") and update this value.
