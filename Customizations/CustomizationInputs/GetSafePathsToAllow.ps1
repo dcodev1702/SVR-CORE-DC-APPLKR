@@ -34,16 +34,14 @@ if ($null -ne $cs)
 {
     if ($cs.PartOfDomain)
     {
-        # Local change for domain controllers: NETLOGON only. SYSVOL is NOT allowed for everyone - members of Group Policy Creator
-        # Owners (and delegated GPO editors) can write their GPO folders under SYSVOL\<domain>\Policies, so an Everyone rule there would
-        # let them plant code that any user may run. Keep logon scripts in NETLOGON. If a server class really needs SYSVOL, add the
-        # share to ExtraAllowedPaths: the build then checks it and excludes what non-admins can write.
         $computerDomain = $cs.Domain
         "\\$computerDomain\netlogon\*"
+        "\\$computerDomain\sysvol\*"
 		$userDomain = $env:USERDNSDOMAIN
 		if ($null -ne $userDomain -and $userDomain.ToUpper() -ne $computerDomain.ToUpper())
 		{
         	"\\$userDomain\netlogon\*"
+        	"\\$userDomain\sysvol\*"
 		}
     }
     else

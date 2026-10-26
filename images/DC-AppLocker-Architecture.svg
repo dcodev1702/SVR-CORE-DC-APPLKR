@@ -128,7 +128,7 @@
 <circle cx="26" cy="206.5" r="3" fill="#4ade80" />
 <text x="36" y="210" fill="#e2e8f0" font-size="12.5">C:\Admin\* (administrators-only folder)</text>
 <circle cx="26" cy="226.5" r="3" fill="#4ade80" />
-<text x="36" y="230" fill="#e2e8f0" font-size="12.5">NETLOGON · Defender platform folder (no SYSVOL)</text>
+<text x="36" y="230" fill="#e2e8f0" font-size="12.5">SYSVOL · NETLOGON · Defender platform folder</text>
 <circle cx="26" cy="246.5" r="3" fill="#4ade80" />
 <text x="36" y="250" fill="#e2e8f0" font-size="12.5">Microsoft-signed installers and scripts</text>
 <text x="22" y="278" fill="#94a3b8" font-size="11" letter-spacing="1.2">DENIED TO NON-ADMINS</text>

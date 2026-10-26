@@ -32,7 +32,7 @@
       "accent": "violet", "icon": "server", "title": "DOMAIN CONTROLLERS", "subtitle": "domain controllers ou · server core 2025",
       "sections": [
         { "label": "Role", "text": "Apply the active GPO; Application Identity enforces the rules for code started in a user's context" },
-        { "label": "Every account may run", "dot": "green", "bullets": ["%WINDIR% + %PROGRAMFILES% minus user-writable folders", "C:\\Admin\\* (administrators-only folder)", "NETLOGON · Defender platform folder (no SYSVOL)", "Microsoft-signed installers and scripts"] },
+        { "label": "Every account may run", "dot": "green", "bullets": ["%WINDIR% + %PROGRAMFILES% minus user-writable folders", "C:\\Admin\\* (administrators-only folder)", "SYSVOL · NETLOGON · Defender platform folder", "Microsoft-signed installers and scripts"] },
         { "label": "Denied to non-admins", "dot": "rose", "bullets": ["C:\\Temp, user profiles, everything else", "cipher · runas · WMIC · MSBuild · InstallUtil ..."] },
         { "label": "Not restricted", "dot": "violet", "bullets": ["SYSTEM + elevated administrators", "services: MECM client, Nessus Agent, Defender"] },
         { "label": "UAC", "dot": "amber", "bullets": ["Non-elevated admin sessions get the non-admin rules", "WinRM and Run as administrator are elevated"] }

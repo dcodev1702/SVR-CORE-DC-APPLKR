@@ -44,7 +44,7 @@
 | Who | May run |
 |---|---|
 | **SYSTEM and elevated administrators** | Everything (AppLocker default rule *All files* for `BUILTIN\Administrators`). |
-| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\NETLOGON`, the Defender platform folder, `C:\Admin\*`, and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`, not `\\<domain>\SYSVOL`**. |
+| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\SYSVOL` and `\\<domain>\NETLOGON` (logon scripts), the Defender platform folder, `C:\Admin\*`, and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`**. |
 
 ### Who AppLocker restricts here
 
@@ -59,9 +59,9 @@
 
 | Collection | Mode in Audit / Enforce | Rules | What they are |
 |---|---|---|---|
-| **Exe** | AuditOnly / **Enabled** | 9 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, Defender platform folder, `C:\Admin\*` · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) |
+| **Exe** | AuditOnly / **Enabled** | 10 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, `\\<domain>\sysvol\*`, Defender platform folder, `C:\Admin\*` · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) |
 | **Msi** | AuditOnly / **Enabled** | 5 | `%WINDIR%\ccmcache\*` (MECM), `%WINDIR%\Installer\*`, Administrators: all, Microsoft-signed MSI, Teams |
-| **Script** | AuditOnly / **Enabled** | 8 | Same paths as Exe, Administrators: all, Microsoft-signed scripts, Teams |
+| **Script** | AuditOnly / **Enabled** | 9 | Same paths as Exe, Administrators: all, Microsoft-signed scripts, Teams |
 | **Appx** | AuditOnly / **Enabled** | 1 | All signed packaged apps (default rule) |
 | **Dll** | **NotConfigured** / **NotConfigured** | 0 | **DLL rules off** — not required by the STIG item (`EnableDllRules = $false`) |
 
@@ -77,7 +77,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
   scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_AL_stig_check.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
-                   GetSafePathsToAllow.ps1    NETLOGON only (no SYSVOL) + ExtraAllowedPaths (C:\Admin\*)
+                   GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
   tests\           Test-AL.ps1 (95 unit tests, no network, both PowerShell editions; 98 with -BuildFolder)
@@ -298,7 +298,7 @@ Per DC: **WN25-00-000080 / V-277992 (CAT II)**, status **NotAFinding** or **Open
 |---|---|
 | AD DS (`NTDS`), DNS, KDC, Netlogon, DFSR (SYSVOL), W32Time, AD Web Services | Services started by the Service Control Manager — not evaluated by this policy; their binaries are in `C:\Windows` anyway |
 | Group Policy processing, startup/shutdown scripts | Run as SYSTEM |
-| Logon scripts | `\\<domain>\NETLOGON` is allowed for everyone. **`\\<domain>\SYSVOL` is not** (tightened: members of *Group Policy Creator Owners* can write GPO folders there) — a GPO *user* logon script stored in SYSVOL does not run in a non-elevated session on a DC; keep logon scripts in NETLOGON |
+| Logon scripts | `\\<domain>\NETLOGON` and `\\<domain>\SYSVOL` are allowed for everyone — NETLOGON scripts and GPO logon scripts stored in SYSVOL run in any session |
 | Administration (`dcdiag`, `repadmin`, `ntdsutil`, `nltest`, `w32tm`, `gpupdate`, `sconfig`, PowerShell 5.1 and 7) | In `C:\Windows` / `C:\Program Files` — allowed even for non-admins; elevated admins may run anything |
 | Defender / Defender for Endpoint, Sysmon | Services; Defender's platform folder in `ProgramData` is allowed for everyone |
 | Windows Update / patching | Microsoft-signed content in `C:\Windows`, installed as SYSTEM |
@@ -314,7 +314,7 @@ Lab result in **Enforce**: `dcdiag` 26 tests passed, DFSR SYSVOL `Normal`, DNS S
 |---|---|---|
 | **`C:\Admin`** | **Allowed for every account** (`ExtraAllowedPaths`) — admin tools and scripts work even in a non-elevated session | Should be changeable by **administrators only** — every folder **and file** in it, including permissions that only apply to new files. The build checks it on **every DC** and never stops: what a non-admin can change is left out of the policy or excepted ([step 4](#step-4--build-the-baseline)); pre-flight warns ahead; validate fails only if a DC still allows such an item. Lab: `O:BAG:DUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` (SYSTEM + Administrators, inheritance removed). |
 | **`C:\Temp`** | **Not allowed** for non-admins | Users can write there (it inherits `C:\`). Never add it to `ExtraAllowedPaths`. Administrators can still run from it — avoid that on a DC. |
-| **`C:\Sysmon`** | **Not allowed** for non-admins | Sysmon's archive folder (SYSTEM only) holds copies of deleted executables and scripts. Never allow it. The Sysmon service itself is `C:\Windows\Sysmon64.exe` — allowed. |
+| **`C:\Sysmon`** | **Not allowed** for non-admins | Sysmon's archive folder (SYSTEM only): with `FileDelete` rules on, it keeps a copy of every deleted file (29 GB on the lab DC). Never allow it. The Sysmon service itself is `C:\Windows\Sysmon64.exe` — allowed. The lab turned file-delete recording and archiving off ([Appendix A](#appendix-a--lab-verification-2026-10-26)). |
 
 The toolkit never sets permissions on `C:\Temp` or `C:\Sysmon`, and on `C:\Admin` only when step 3 creates a missing folder or you run it with `-Fix`.
 
@@ -402,15 +402,17 @@ AaronLocker decides which folders under `C:\Windows` and `Program Files` are *us
 
 ## Appendix A — Lab verification (2026-10-26)
 
-One Windows Server 2025 Datacenter **Server Core** DC (`DC25-1`, PDC emulator, AD DS + DNS + Defender for Endpoint + Sysmon; no MECM, no Nessus Agent), management computer Windows 11 with Windows PowerShell 5.1 and PowerShell 7.6. The full cycle ran twice; this is the second run, with the **tightened** baseline (no SYSVOL rule) and `C:\Admin` checked on every DC. Each step ran in the edition shown; the read-only checks ran in both.
+One Windows Server 2025 Datacenter **Server Core** DC (`DC25-1`, PDC emulator, AD DS + DNS + Defender for Endpoint + Sysmon; no MECM, no Nessus Agent), management computer Windows 11 with Windows PowerShell 5.1 and PowerShell 7.6. The full cycle ran three times; this is the final run: the baseline with `\\<domain>\SYSVOL` and `NETLOGON` allowed for everyone (logon scripts) and `C:\Admin` checked on every DC. Each step ran in the edition shown; the read-only checks ran in both.
+
+The lab DC also got two changes outside this toolkit: the PDC emulator now syncs time from external NTP sources (NIST, US Naval Observatory, Microsoft) instead of the Hyper-V host, and Sysmon no longer records or archives file deletes (Events 23/26 off; it had archived 29 GB in `C:\Sysmon`). Sysmon 15 runs as a protected process (`ANTIMALWARE LIGHT`): its service cannot be stopped or restarted by an administrator, and `Sysmon64.exe -c <config>` applies a configuration live.
 
 | # | Step | Edition | Result |
 |---|---|---|---|
 | 1 | `0_AL_pre-flight` | 5.1 + 7 | PASSED |
 | 2 | `0_AL_secure_folders -WhatIf` | 5.1 + 7 | `C:\Admin` administrators-only — nothing to change, no permissions set |
-| 3 | `1_AL_build_policy` | 7 | Exe 9 · Msi 5 · Script 8 · Appx 1 rules; only UNC rule `\\<domain>\netlogon\*`; `C:\Admin\*` allowed (administrators-only on every DC) |
+| 3 | `1_AL_build_policy` | 7 | Exe 10 · Msi 5 · Script 9 · Appx 1 rules; UNC rules `\\<domain>\netlogon\*` and `\\<domain>\sysvol\*`; `C:\Admin\*` allowed (administrators-only on every DC) |
 | 4 | `3_AL_set_mode -Mode Audit -Refresh` | 5.1 | Enforce link disabled, then Audit enabled |
-| 5 | `2_AL_create_gpos` | 7 | Both GPOs backed up, written, read back and verified (Audit v10, Enforce v6) |
+| 5 | `2_AL_create_gpos` | 7 | Both GPOs backed up, written, read back and verified (Audit v12, Enforce v8) |
 | 6 | `4_AL_validate -Mode Audit` | 5.1 + 7 | PASSED |
 | 7 | DC functions in Audit + `5_AL_review_events` | 7 / 5.1 | `dcdiag` 26/26; 0 would-be-blocked events |
 | 8 | `3_AL_set_mode -Mode Enforce -Refresh` | 7 | Audit link disabled, then Enforce enabled |
@@ -427,7 +429,7 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | `dcdiag`, `repadmin`, `ntdsutil`, `nltest`, `w32tm`, `gpupdate`, `powershell.exe`, `pwsh.exe`, `Sysmon64.exe`, `sconfig.cmd`, Defender `MpCmdRun.exe` | Allowed | Allowed |
 | `cipher.exe`, `runas.exe`, `WMIC.exe` (deny list) | **Denied** | Allowed |
 | `C:\Temp\*.exe`, `C:\Temp\*.ps1` | **Denied** | Allowed |
-| A script in a GPO folder under `\\<domain>\SYSVOL\<domain>\Policies\` | **Denied** (tightened) | Allowed |
+| A script in a GPO folder under `\\<domain>\SYSVOL\<domain>\Policies\` (logon scripts) | Allowed | Allowed |
 
 **Not verified in the lab:** MECM, Nessus, more than one DC, and a real block of a non-admin logon (no non-admin can log on to the lab DC).
 
@@ -530,7 +532,7 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 - **No services enforcement in this baseline** — services are not evaluated (AppLocker's default) unless MECM's managed installer turns it on through its local policy; the baseline is safe either way on DCs (services run as SYSTEM or from the allowed folders).
 - **AaronLocker is not maintained since 2022.** It only *generates XML*; the deployment (GPO, links, service) is plain Group Policy and `Set-AppLockerPolicy`. Keep each `Outputs\<profile>\<ts>` folder: it is what you tested.
 - **Desktop leftovers** in the baseline (the Microsoft Teams publisher rule, the AaronLocker timestamp rule) are harmless on a DC.
-- **`\\<domain>\SYSVOL\*` is NOT allowed for everyone** (tightened from AaronLocker's default in the `Customizations` overlay): members of *Group Policy Creator Owners* and delegated GPO editors can write their GPO folders there. NETLOGON stays allowed (administrators-only). A server class that needs SYSVOL can add the share to `ExtraAllowedPaths`; the build then excludes the writable `Policies` folders.
+- **`\\<domain>\SYSVOL\*` and `\\<domain>\NETLOGON\*` are allowed for everyone** (AaronLocker's default, needed for logon scripts). Members of *Group Policy Creator Owners* and delegated GPO editors can write their own GPO folders under SYSVOL; keep that group administrators-only (in the lab its only member is `Administrator`).
 - **`C:\Admin` never breaks the build**: what a non-admin can change is left out or excepted, on the evidence of every DC in scope — the policy stays safe without anyone changing permissions.
 - **Administrators are allowed everywhere** (AppLocker default rule): this constrains non-admin and non-elevated code, not an administrator.
 - **Audit mode logs allowed executions too**, which is why the logs are enlarged (`EventLogSizesMB`). Forward the AppLocker logs with Windows Event Forwarding / your SIEM if you need history.
