@@ -2,10 +2,13 @@
 # baseline ON the reference server, because the rules depend on that machine's file system (user-writable folders under Windows and
 # Program Files - including the MECM client's folders -, tools present, safe paths).
 #   1. checks the AccessChk.exe that ships with the toolkit (Microsoft signature, 64-bit, pinned SHA-256) - nothing is downloaded
-#   2. copies the toolkit + Customizations + ExtraAllowedPaths (C:\Admin ...) + KnownAdmins to a temporary folder on the server over WinRM
-#   3. stops if an extra path can be changed by a non-admin (a path rule there would be a bypass)
+#   2. copies the toolkit + Customizations + KnownAdmins to a temporary folder on the server over WinRM
+#   3. checks every ExtraAllowedPaths entry (C:\Admin ...) on the reference server AND every server in the target OUs, and never stops on
+#      what it finds: an entry a non-admin can change is LEFT OUT of the policy; items inside it that a non-admin can change become
+#      EXCEPTIONS of its rule. So the policy never allows what a non-admin can write, and no permission is ever changed.
 #   4. runs Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan on the server (it only READS permissions; nothing is applied to the server)
-#   5. copies the results to <root>\Outputs\<profile>\<timestamp>\ and removes the temporary folder from the server
+#   5. copies the results to <root>\Outputs\<profile>\<timestamp>\ (+ the exceptions from step 3, recorded in build-info.json) and
+#      removes the temporary folder from the server
 param(
     [string]$SettingsFile,
     [string]$ComputerName,
@@ -50,19 +53,32 @@ try {
         Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\KnownAdmins.txt') -Value $using:Known -Encoding UTF8 }
         Write-Host "Known administrators groups: $($Known -join ', ')"
     }
+    $Plan = [pscustomobject]@{ Keep = @(); Drop = @(); Exceptions = @{} }
+    $Checked = @(); $Unchecked = @()
     if ($Extra.Count) {
-        $Findings = @(Invoke-ALWritableCheck -Paths $Extra -Cfg $Cfg -Session $Session)
-        $Writable = @($Findings | Where-Object { $_.Kind -eq 'WRITABLE' })
-        if ($Writable.Count) {
-            $Writable | ForEach-Object { Write-Host "  WRITABLE: $($_.Path) (by $($_.Account))" -ForegroundColor Red }
-            throw 'STOP: an ExtraAllowedPaths entry can be changed by non-admins. Remove that access (README, "C:\Admin"), list the group in KnownAdmins if it is an administrators group, or remove the entry from the settings.'
+        # Every server the policy will reach, not only the reference: the GPO carries one rule set for all of them
+        $Findings = New-Object System.Collections.Generic.List[object]
+        @(Invoke-ALWritableCheck -Paths $Extra -Cfg $Cfg -Session $Session) | ForEach-Object { $Findings.Add($_) }
+        $Checked += $ComputerName
+        $Others = @()
+        try { Import-ALModule ActiveDirectory; $Domain = Get-ALDomainInfo; $Others = @(Get-ALTargetComputers (Resolve-ALTargetOUs $Cfg $Domain) $Domain | Where-Object { $_ -ne $ComputerName -and $_ -notlike "$ComputerName.*" -and $ComputerName -notlike "$_.*" }) }
+        catch { Write-Warning "Could not list the servers in the target OUs ($($_.Exception.Message)); only the reference server was checked." }
+        foreach ($C in $Others) {
+            try { @(Invoke-ALWritableCheck -Paths $Extra -Cfg $Cfg -ComputerName $C) | ForEach-Object { $Findings.Add($_) }; $Checked += $C }
+            catch { $Unchecked += $C; Write-Warning "$C : ExtraAllowedPaths not checked ($($_.Exception.Message)). Run 4_AL_validate.ps1 for it after deployment." }
         }
-        foreach ($F in @($Findings | Where-Object { $_.Kind -ne 'WRITABLE' })) {
-            if ($F.Kind -eq 'NOTFOUND') { Write-Warning "$($F.Path) does not exist on the reference server; the rule is still generated. Create that folder administrators-only (0_AL_secure_folders.ps1) before the policy is used." }
-            else { Write-Warning "$($F.Kind): $($F.Path)" }
+        $Plan = Get-ALExtraPathPlan $Extra $Findings
+        foreach ($F in @($Findings | Where-Object { $_.Kind -in 'NOTFOUND', 'UNRESOLVED' })) {
+            if ($F.Kind -eq 'NOTFOUND') { Write-Warning "$($F.Path) does not exist on $($F.Computer); the rule is still generated. Create that folder administrators-only (0_AL_secure_folders.ps1) before the policy is used." }
+            else { Write-Warning "KnownAdmins entry '$($F.Path)' could not be resolved on $($F.Computer)." }
         }
-        Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\ExtraAllowedPaths.txt') -Value $using:Extra -Encoding UTF8 }
-        Write-Host "Extra allowed paths: $($Extra -join ', ')"
+        foreach ($E in $Plan.Keep) {
+            if ($Plan.Exceptions.ContainsKey($E)) { Write-Host "Extra allowed path: $E - allowed for every account EXCEPT (non-admins can change these): $($Plan.Exceptions[$E] -join ', ')" -ForegroundColor Yellow }
+            else { Write-Host "Extra allowed path: $E - allowed for every account (administrators-only on: $($Checked -join ', '))" }
+        }
+        foreach ($D in $Plan.Drop) { Write-Host "Extra allowed path: $($D.Entry) - LEFT OUT of the policy: $($D.Reason). Non-admins cannot run from it; elevated administrators still can. Fix its permissions (README, C:\Admin) and rebuild to allow it." -ForegroundColor Yellow }
+        $Keep = @($Plan.Keep)
+        if ($Keep.Count) { Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\ExtraAllowedPaths.txt') -Value $using:Keep -Encoding UTF8 } }
     }
 
     Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
@@ -76,11 +92,19 @@ try {
     Copy-Item -Path (Join-Path $RemoteWork 'ScanResults') -Destination $Dest -FromSession $Session -Recurse -Force
     $Rules = @(Get-ChildItem -LiteralPath $Dest -Filter 'AppLockerRules-*.xml' -File)
     if (-not @($Rules | Where-Object { $_.Name -like '*-Audit.xml' }).Count -or -not @($Rules | Where-Object { $_.Name -like '*-Enforce.xml' }).Count) { throw "STOP: the build produced no Audit/Enforce rules file in $Dest - see the AaronLocker output above." }
+    # Exceptions for items inside an extra path that a non-admin can change (step 3), in both rule files
+    if ($Plan.Exceptions.Count) {
+        foreach ($R in $Rules) { $N = Add-ALPathExceptions $R.FullName $Plan.Exceptions; Write-Host "  $($R.Name): exceptions added to $N rule(s)" }
+    }
     [ordered]@{
-        Built = (Get-Date).ToString('s'); ReferenceServer = $ComputerName; ExtraAllowedPaths = $Extra; KnownAdmins = $Known; AccessChk = $Check.Detail
+        Built = (Get-Date).ToString('s'); ReferenceServer = $ComputerName; KnownAdmins = $Known; AccessChk = $Check.Detail
+        ExtraAllowedPaths = [ordered]@{
+            Requested = $Extra; Allowed = $Plan.Keep; LeftOut = @($Plan.Drop | ForEach-Object { [ordered]@{ Entry = $_.Entry; Reason = $_.Reason } })
+            Exceptions = $Plan.Exceptions; CheckedOn = $Checked; NotChecked = $Unchecked
+        }
         Rules = @($Rules | ForEach-Object { [ordered]@{ File = $_.Name; Sha256 = (Get-ALSha256 $_.FullName) } })
         Settings = $Cfg.SettingsFile; PowerShell = "$($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Dest 'build-info.json') -Encoding UTF8
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Dest 'build-info.json') -Encoding UTF8
     # Only the folder name: the whole tree can be moved or copied to another computer
     Set-Content -LiteralPath (Join-Path $Cfg.OutRoot 'latest.txt') -Value $Cfg.Stamp -Encoding Ascii
 

@@ -31,6 +31,7 @@ $Probe = {
         SvcState    = "$($Svc.State)"
         SvcStart    = "$($Svc.StartMode)"
         Collections = @($Doc.AppLockerPolicy.RuleCollection | ForEach-Object { [pscustomobject]@{ Type = "$($_.Type)"; Mode = "$($_.EnforcementMode)"; Rules = @($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count } })
+        Services    = (@($Doc.AppLockerPolicy.RuleCollection | ForEach-Object { $_.RuleCollectionExtensions.ThresholdExtensions.Services.EnforcementMode } | Where-Object { $_ } | Select-Object -Unique)) -join ','
         Blocked24h  = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL', 'Microsoft-Windows-AppLocker/MSI and Script'; Id = 8004, 8007; StartTime = (Get-Date).AddHours(-24) } -ErrorAction SilentlyContinue).Count
         Checked     = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture)
     }
@@ -72,7 +73,9 @@ try {
                     Msi               = & $Value 'Msi'
                     Script            = & $Value 'Script'
                     Appx              = & $Value 'Appx'
-                    Dll               = & $Value 'Dll'
+                    Dll               = "$(& $Value 'Dll')$(if (-not $Cfg.EnableDllRules) { ' - DLL rules off in this baseline (not required by the STIG)' })"
+                    ManagedInstaller  = "$(& $Value 'ManagedInstaller')$(if ($Col['ManagedInstaller']) { ' - MECM managed installer (local policy)' })"
+                    ServicesEnforcement = $(if ($P.Services -match 'Enabled') { 'Enabled (MECM managed installer)' } else { 'not configured (services are not evaluated)' })
                     ApplicationIdentity = "$($P.SvcState) / $($P.SvcStart)"
                     Blocked24h        = $P.Blocked24h
                     Os                = $P.Os

@@ -3,6 +3,8 @@
 #   EXE and DLL log:  8003 (audit) / 8004 (blocked)     MSI and Script log: 8006 / 8007     Packaged app-Execution log: 8021 / 8022
 # Output: a summary per file / user / rule (most frequent first; Tag = MECM, NESSUS, ADMIN (an ExtraAllowedPaths folder such as C:\Admin)
 # or SYSVOL) and a CSV of every event in <root>\Outputs\<profile>\events-<timestamp>.csv. Allowed events (8002/8005/8020) are not collected.
+# With DLL rules off (EnableDllRules = $false) DLL events are counted but not listed: they come from another policy - typically the
+# MECM managed installer's audit-only DLL rules - and need no rule in this baseline. The servers filter them before sending anything.
 param(
     [string]$SettingsFile,
     [string[]]$TargetOU,
@@ -14,17 +16,24 @@ param(
 . "$PSScriptRoot\AL-Common.ps1"
 $Cfg = Initialize-AL -ScriptName '5_AL_review_events' -SettingsFile $SettingsFile -Overrides @{ TargetOUs = $TargetOU }
 $Collect = {
-    param([int]$Days, [int]$Max)
-    $Since = (Get-Date).AddDays(-$Days)
+    param([int]$Days, [int]$Max, [bool]$DllRules)
+    $Ms = [int64]$Days * 86400000
     $Spec = @(@{ Log = 'EXE and DLL'; Ids = 8003, 8004 }, @{ Log = 'MSI and Script'; Ids = 8006, 8007 }, @{ Log = 'Packaged app-Execution'; Ids = 8021, 8022 })
     foreach ($S in $Spec) {
-        $Events = @(Get-WinEvent -FilterHashtable @{ LogName = "Microsoft-Windows-AppLocker/$($S.Log)"; Id = $S.Ids; StartTime = $Since } -MaxEvents $Max -ErrorAction SilentlyContinue)
+        $Base = "*[System[($(($S.Ids | ForEach-Object { "EventID=$_" }) -join ' or ')) and TimeCreated[timediff(@SystemTime) <= $Ms]]]"
+        $XPath = $Base
+        if ($S.Log -eq 'EXE and DLL' -and -not $DllRules) {
+            $XPath = "$Base and *[UserData[RuleAndFileData[PolicyName='EXE']]]"
+            $Dll = @(Get-WinEvent -LogName "Microsoft-Windows-AppLocker/$($S.Log)" -FilterXPath "$Base and *[UserData[RuleAndFileData[PolicyName='DLL']]]" -MaxEvents $Max -ErrorAction SilentlyContinue).Count
+            [pscustomobject]@{ DllSkipped = $Dll; Computer = $env:COMPUTERNAME }
+        }
+        $Events = @(Get-WinEvent -LogName "Microsoft-Windows-AppLocker/$($S.Log)" -FilterXPath $XPath -MaxEvents $Max -ErrorAction SilentlyContinue)
         foreach ($E in $Events) {
             $D = ([xml]$E.ToXml()).Event.UserData.RuleAndFileData
             $User = "$($D.TargetUser)"
             try { $User = (New-Object System.Security.Principal.SecurityIdentifier $User).Translate([System.Security.Principal.NTAccount]).Value } catch { }
             [pscustomobject]@{
-                Time = $E.TimeCreated; Computer = $env:COMPUTERNAME; Log = $S.Log; EventId = $E.Id
+                Time = $E.TimeCreated; Computer = $env:COMPUTERNAME; Log = $S.Log; Collection = "$($D.PolicyName)"; EventId = $E.Id
                 Result = $(if ($E.Id -in 8003, 8006, 8021) { 'Audit (would be blocked)' } else { 'BLOCKED' })
                 User = $User; File = $(if ($D.FullFilePath) { "$($D.FullFilePath)" } else { "$($D.FilePath)" }); Rule = "$($D.RuleName)"; Publisher = "$($D.Fqbn)"
             }
@@ -37,7 +46,13 @@ try {
     if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers (Resolve-ALTargetOUs $Cfg $Domain) $Domain }
     $All = New-Object System.Collections.Generic.List[object]
     foreach ($C in $ComputerName) {
-        try { $Rows = @(Invoke-Command -ComputerName $C -ScriptBlock $Collect -ArgumentList $Days, $MaxEventsPerLog -ErrorAction Stop); $Rows | ForEach-Object { $All.Add($_) }; Write-Host "$C : $($Rows.Count) audit/blocked event(s) in the last $Days day(s)" }
+        try {
+            $Out = @(Invoke-Command -ComputerName $C -ScriptBlock $Collect -ArgumentList $Days, $MaxEventsPerLog, ([bool]$Cfg.EnableDllRules) -ErrorAction Stop)
+            $Rows = @($Out | Where-Object { $null -eq $_.PSObject.Properties['DllSkipped'] })
+            $Rows | ForEach-Object { $All.Add($_) }
+            $Dll = (@($Out | Where-Object { $null -ne $_.PSObject.Properties['DllSkipped'] }) | Measure-Object -Property DllSkipped -Sum).Sum
+            Write-Host "$C : $($Rows.Count) audit/blocked event(s) in the last $Days day(s)$(if ($Dll) { " (+ $Dll DLL audit event(s) not listed: DLL rules are off in this baseline - they come from another policy, e.g. the MECM managed installer)" })"
+        }
         catch { Write-Host "$C : FAILED - $($_.Exception.Message)" -ForegroundColor Red }
     }
     if (-not $All.Count) { Write-Host "`nNo audit or blocked events in the last $Days day(s). (AppLocker only logs these when something runs that no rule allows.)" -ForegroundColor Green }

@@ -26,13 +26,14 @@ $Probe = {
     $o.AppLockerModule = [bool](Get-Module -ListAvailable AppLocker)
     $svc = Get-CimInstance Win32_Service -Filter "Name='AppIDSvc'"
     $o.AppId = "$($svc.State)/$($svc.StartMode)"
-    $o.EffectiveRules = 0; $o.LocalRules = 0; $o.ServicesEnforcement = ''
+    $o.EffectiveRules = 0; $o.LocalRules = 0; $o.LocalTypes = @(); $o.ServicesEnforcement = ''
     try {
         [xml]$eff = Get-AppLockerPolicy -Effective -Xml
         $o.EffectiveRules = @($eff.AppLockerPolicy.RuleCollection.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count
         $o.ServicesEnforcement = (@($eff.AppLockerPolicy.RuleCollection | ForEach-Object { $_.RuleCollectionExtensions.ThresholdExtensions.Services.EnforcementMode } | Where-Object { $_ } | Select-Object -Unique)) -join ','
         [xml]$loc = Get-AppLockerPolicy -Local -Xml
         $o.LocalRules = @($loc.AppLockerPolicy.RuleCollection.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count
+        $o.LocalTypes = @($loc.AppLockerPolicy.RuleCollection | Where-Object { @($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count } | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)" })
     } catch { }
     # Configuration Manager
     $ccm = Get-Service -Name CcmExec -ErrorAction SilentlyContinue
@@ -118,9 +119,12 @@ try {
         if ($P.ExecPolicy -in 'AllSigned', 'Restricted') { Add-ALResult $R $(if ($IsRef) { 'FAIL' } else { 'INFO' }) "Execution policy $Tag" "$($P.ExecPolicy) - AaronLocker's scripts are not signed and cannot run there$(if ($IsRef) { ' (the build runs them on this server)' })" }
         if (-not $P.AppLockerModule) { Add-ALResult $R 'FAIL' "AppLocker module $Tag" 'missing' }
         Add-ALResult $R 'INFO' "Application Identity $Tag" $P.AppId
-        if ($P.LocalRules -gt 0) { Add-ALResult $R 'WARN' "Local AppLocker policy $Tag" "$($P.LocalRules) rule(s) in the LOCAL policy; they merge with the GPO policy (MECM managed-installer rules land here - README, MECM)" }
+        if ($P.LocalRules -gt 0) {
+            if (@($P.LocalTypes | Where-Object { $_ -like 'ManagedInstaller=*' }).Count) { Add-ALResult $R 'INFO' "MECM managed installer $Tag" "local AppLocker policy ($($P.LocalTypes -join ', ')) merges with the GPO: expected. Its audit-only DLL rules and services enforcement stay; the GPO decides Exe/Msi/Script/Appx (README, MECM)" }
+            else { Add-ALResult $R 'WARN' "Local AppLocker policy $Tag" "$($P.LocalRules) rule(s) in the LOCAL policy ($($P.LocalTypes -join ', ')) merge with the GPO policy - review Get-AppLockerPolicy -Local -Xml" }
+        }
         if ($P.EffectiveRules -gt 0) { Add-ALResult $R 'INFO' "Effective AppLocker policy $Tag" "$($P.EffectiveRules) rule(s) already effective (from GPO and/or local policy)" }
-        if ($P.ServicesEnforcement -match 'Enabled') { Add-ALResult $R 'WARN' "Services enforcement $Tag" 'the effective policy applies AppLocker to services too (usually from an MECM managed-installer policy) - services from outside the allowed folders can be blocked' }
+        if ($P.ServicesEnforcement -match 'Enabled') { Add-ALResult $R 'INFO' "Services enforcement $Tag" 'on (from the MECM managed-installer policy): services are evaluated too - SYSTEM services and services in the allowed folders are unaffected; any at risk are listed below as WARN' }
         if ($P.MecmClient) { Add-ALResult $R 'INFO' "MECM client $Tag" "$($P.MecmClient) - runs as SYSTEM, not restricted (README, MECM)" }
         if ($P.MecmSiteDir) { Add-ALResult $R 'WARN' "MECM site server $Tag" "installed in '$($P.MecmSiteDir)'; services: $($P.MecmServices -join ', '). Site systems are a separate server class with their own settings file, reference server and GPO pair." }
         if ($P.Sql.Count) { Add-ALResult $R 'INFO' "SQL Server $Tag" "running: $($P.Sql -join ', ')" }
@@ -131,15 +135,18 @@ try {
         }
         foreach ($T in $P.OutsideTasks) { Add-ALResult $R 'WARN' "Task outside allowed folders $Tag" "$T - for a non-admin or non-elevated account this is BLOCKED in Enforce; add the folder to ExtraAllowedPaths (admin-only!) or move the file" }
 
-        # Every ExtraAllowedPaths entry (C:\Admin, MECM, SQL ...) must be changeable by administrators only on this server
+        # Every ExtraAllowedPaths entry (C:\Admin, MECM, SQL ...) should be changeable by administrators only on this server. If not, the
+        # build does not stop: it leaves the entry out (or excepts the items) so the policy never allows what a non-admin can write.
         if (@($Cfg.ExtraAllowedPaths).Count) {
             try { $Found = @(Invoke-ALWritableCheck -Paths $Cfg.ExtraAllowedPaths -Cfg $Cfg -ComputerName $C) }
-            catch { Add-ALResult $R 'FAIL' "Extra paths $Tag" "permission check failed: $($_.Exception.Message)"; continue }
+            catch { Add-ALResult $R 'WARN' "Extra paths $Tag" "permission check failed: $($_.Exception.Message)"; continue }
             foreach ($F in $Found) {
+                $Entry = @($Cfg.ExtraAllowedPaths | Where-Object { Test-ALPathUnder $F.Path $_ }) | Select-Object -First 1
+                $Effect = if ($F.Kind -in 'WRITABLE', 'UNREADABLE' -and $Entry -and (ConvertTo-ALComparablePath $F.Path) -eq (ConvertTo-ALComparablePath ($Entry -replace '\\\*$', ''))) { "the build will LEAVE $Entry OUT of the policy (non-admins cannot run from it)" } else { 'the build will EXCLUDE it from the rule (non-admins cannot run it)' }
                 switch ($F.Kind) {
-                    'WRITABLE' { Add-ALResult $R 'FAIL' "Extra path writable $Tag" "$($F.Path) can be changed by $($F.Account) - a path rule there is a bypass. Remove that access (README, C:\Admin), or add the group to KnownAdmins if it is an administrators group." }
+                    'WRITABLE' { Add-ALResult $R 'WARN' "Extra path writable $Tag" "$($F.Path) can be changed by $($F.Account) - $Effect. To keep it allowed, remove that access (README, C:\Admin) or add the group to KnownAdmins if it is an administrators group." }
                     'NOTFOUND' { Add-ALResult $R 'WARN' "Extra path missing $Tag" "$($F.Path) does not exist. Create it administrators-only BEFORE the policy is used (README, C:\Admin)." }
-                    'UNREADABLE' { Add-ALResult $R 'WARN' "Extra path unreadable $Tag" "$($F.Path): permissions could not be read" }
+                    'UNREADABLE' { Add-ALResult $R 'WARN' "Extra path unreadable $Tag" "$($F.Path): permissions could not be read - $Effect" }
                     'UNRESOLVED' { Add-ALResult $R 'WARN' "KnownAdmins $Tag" "'$($F.Path)' could not be resolved on this server" }
                 }
             }

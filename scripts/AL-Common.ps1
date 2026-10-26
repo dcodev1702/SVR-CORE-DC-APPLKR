@@ -291,11 +291,12 @@ function Test-ALAccessChk([string]$Path, [string]$Sha256) {
 }
 
 # Runs ON a server (through Invoke-ALWritableCheck). For every ExtraAllowedPaths / SecureFolders entry it emits
-#   NOTFOUND|<path>                       the path does not exist on that server
-#   WRITABLE|<file or folder>|<account>   an account that is not an administrator may write, delete or re-permission it, so a path
-#                                         rule there would let that account plant code that every user may run
-#   UNREADABLE|<file or folder>           its permissions could not be read
-#   UNRESOLVED|<KnownAdmins entry>        a KnownAdmins name could not be resolved to a SID on that server
+#   NOTFOUND|<path>                           the path does not exist on that server
+#   WRITABLE|<file or folder>|<account>|D/F   an account that is not an administrator may write, delete or re-permission it, so a
+#                                             path rule there would let that account plant code that every user may run
+#   UNREADABLE|<file or folder>||D/F          its permissions could not be read
+#   UNRESOLVED|<KnownAdmins entry>            a KnownAdmins name could not be resolved to a SID on that server
+# (D = folder, F = file)
 # Administrators = the accounts AaronLocker's scan also ignores (SYSTEM, LOCAL/NETWORK SERVICE, SERVICE, Administrators, Server/Print/
 # Backup Operators, TrustedInstaller and other NT SERVICE\ accounts), the direct members of Administrators (on a DC: Administrator,
 # Domain Admins, Enterprise Admins) and KnownAdmins. CREATOR OWNER is ignored: it only covers what an account creates, and creating
@@ -323,34 +324,135 @@ $ALWritableCheck = {
         $Items = @(Get-Item -LiteralPath $Target -Force)
         if ($Items[0].PSIsContainer) { $Items += @(Get-ChildItem -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue) }
         foreach ($I in $Items) {
+            $Type = if ($I.PSIsContainer) { 'D' } else { 'F' }
             try { $Rules = (Get-Acl -LiteralPath $I.FullName -ErrorAction Stop).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) }
-            catch { "UNREADABLE|$($I.FullName)"; continue }
+            catch { "UNREADABLE|$($I.FullName)||$Type"; continue }
             foreach ($Rule in $Rules) {
                 $Sid = $Rule.IdentityReference.Value
                 if ($Rule.AccessControlType -ne 'Allow' -or ([int64]$Rule.FileSystemRights -band $Mask) -eq 0) { continue }
                 if ($Admin.Contains($Sid) -or $Sid -like 'S-1-5-80-*' -or $Sid -match '^S-1-5-21-.+-(500|512|519)$') { continue }
                 $Name = $Sid
                 try { $Name = "$($Rule.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value) ($Sid)" } catch { }
-                "WRITABLE|$($I.FullName)|$Name"
+                "WRITABLE|$($I.FullName)|$Name|$Type"
                 break
             }
         }
     }
 }
 
-# Runs $ALWritableCheck on a server (-ComputerName or -Session) with the KnownAdmins setting; returns Kind / Path / Account rows
+# Runs $ALWritableCheck on a server (-ComputerName or -Session) with the KnownAdmins setting; returns Kind / Path / Account /
+# IsFolder / Computer rows
 function Invoke-ALWritableCheck([string[]]$Paths, $Cfg, [string]$ComputerName, $Session) {
     $Where = if ($Session) { @{ Session = $Session } } else { @{ ComputerName = $ComputerName } }
+    $Name = if ($Session) { $Session.ComputerName } else { $ComputerName }
     foreach ($Line in @(Invoke-Command @Where -ScriptBlock $ALWritableCheck -ArgumentList @($Paths), @($Cfg.KnownAdmins) -ErrorAction Stop)) {
         $F = "$Line" -split '\|'
-        [pscustomobject]@{ Kind = $F[0]; Path = $F[1]; Account = $(if ($F.Count -gt 2) { $F[2] } else { '' }) }
+        [pscustomobject]@{ Kind = $F[0]; Path = $F[1]; Account = $(if ($F.Count -gt 2) { $F[2] } else { '' }); IsFolder = ($F.Count -gt 3 -and $F[3] -eq 'D'); Computer = $Name }
     }
 }
 
+# Compares paths the way AppLocker does: case-insensitive, %OSDRIVE% = C:
+function ConvertTo-ALComparablePath([string]$Path) { return ($Path -replace '^%OSDRIVE%', 'C:').TrimEnd('\').ToUpperInvariant() }
+
 # True when a file/folder reported by $ALWritableCheck lies inside an ExtraAllowedPaths / SecureFolders entry
 function Test-ALPathUnder([string]$Item, [string]$Entry) {
-    $Base = ($Entry -replace '\\\*$', '').TrimEnd('\')
-    return ($Item -eq $Base -or $Item.StartsWith($Base + '\', [StringComparison]::OrdinalIgnoreCase))
+    $I = ConvertTo-ALComparablePath $Item
+    $Base = ConvertTo-ALComparablePath ($Entry -replace '\\\*$', '')
+    return ($I -eq $Base -or $I.StartsWith($Base + '\', [StringComparison]::Ordinal))
+}
+
+# True when an item is excluded from an allow rule by one of its exception paths (folder\* covers the folder and everything in it;
+# a file exception covers exactly that file)
+function Test-ALCovered([string]$Item, [string[]]$Exceptions) {
+    foreach ($E in @($Exceptions | Where-Object { $_ })) {
+        if ($E -match '\\\*$') { if (Test-ALPathUnder $Item $E) { return $true } }
+        elseif ((ConvertTo-ALComparablePath $Item) -eq (ConvertTo-ALComparablePath $E)) { return $true }
+    }
+    return $false
+}
+
+# What the build does with each ExtraAllowedPaths entry, from the permission findings of EVERY server it checked. The build never
+# stops on permissions and never allows something that a non-admin can change:
+#   Keep        allowed for every account
+#   Drop        the entry itself (top folder or file) can be changed by a non-admin on some server, or its permissions cannot be
+#               read: it is left out of the policy (non-admins cannot run from it; elevated administrators still can)
+#   Exceptions  only items inside it can: the entry is allowed, with those items as exceptions (folder\* or file)
+function Get-ALExtraPathPlan([string[]]$Entries, $Findings) {
+    $Keep = New-Object System.Collections.Generic.List[string]
+    $Drop = New-Object System.Collections.Generic.List[object]
+    $Except = @{}
+    foreach ($E in @($Entries | Where-Object { $_ })) {
+        $Base = ConvertTo-ALComparablePath ($E -replace '\\\*$', '')
+        $Bad = @($Findings | Where-Object { $_.Kind -in 'WRITABLE', 'UNREADABLE' -and (Test-ALPathUnder $_.Path $E) })
+        $Top = @($Bad | Where-Object { (ConvertTo-ALComparablePath $_.Path) -eq $Base })
+        if ($Top.Count) {
+            $Why = @($Top | ForEach-Object { "$(if ($_.Kind -eq 'WRITABLE') { "changeable by $($_.Account)" } else { 'permissions unreadable' }) on $($_.Computer)" } | Select-Object -Unique)
+            $Drop.Add([pscustomobject]@{ Entry = $E; Reason = ($Why -join '; ') })
+            continue
+        }
+        $Keep.Add($E)
+        $List = New-Object System.Collections.Generic.List[string]
+        foreach ($B in @($Bad | Sort-Object { $_.Path.Length }, Path)) {
+            $X = if ($B.IsFolder) { "$($B.Path)\*" } else { $B.Path }
+            if (-not (Test-ALCovered $B.Path @($List)) -and $X -notin $List) { $List.Add($X) }
+        }
+        if ($List.Count) { $Except[$E] = @($List) }
+    }
+    # .ToArray(): @() around an empty List[object] inside a [pscustomobject] literal throws 'Argument types do not match'
+    [pscustomobject]@{ Keep = $Keep.ToArray(); Drop = $Drop.ToArray(); Exceptions = $Except }
+}
+
+# Adds exception paths to the allow rules of the given entries (every rule collection) in an AppLocker policy file; returns the number
+# of rules changed. Used by the build for items inside ExtraAllowedPaths that a non-admin can change.
+function Add-ALPathExceptions([string]$XmlFile, [hashtable]$Exceptions) {
+    if (-not $Exceptions -or -not $Exceptions.Count) { return 0 }
+    $Doc = New-Object System.Xml.XmlDocument
+    $Doc.Load($XmlFile)
+    $Changed = 0
+    foreach ($Rule in @($Doc.SelectNodes('//FilePathRule'))) {
+        $Path = ConvertTo-ALComparablePath "$($Rule.Conditions.FilePathCondition.Path)"
+        foreach ($Entry in @($Exceptions.Keys)) {
+            if ($Path -ne (ConvertTo-ALComparablePath $Entry)) { continue }
+            $Ex = $Rule.SelectSingleNode('Exceptions')
+            if (-not $Ex) { $Ex = $Doc.CreateElement('Exceptions'); [void]$Rule.AppendChild($Ex) }
+            foreach ($X in @($Exceptions[$Entry])) {
+                if (@($Ex.SelectNodes('FilePathCondition') | Where-Object { (ConvertTo-ALComparablePath $_.GetAttribute('Path')) -eq (ConvertTo-ALComparablePath $X) }).Count) { continue }
+                $C = $Doc.CreateElement('FilePathCondition')
+                $C.SetAttribute('Path', $X)
+                [void]$Ex.AppendChild($C)
+            }
+            $Changed++
+        }
+    }
+    if ($Changed) { $Doc.Save($XmlFile) }
+    return $Changed
+}
+
+# The EXE allow rule for an ExtraAllowedPaths entry in a policy: $null when the policy has no such rule (the build left the entry out),
+# otherwise its exception paths (an empty array when it has none)
+function Get-ALRuleExceptions([xml]$Policy, [string]$Entry) {
+    $Want = ConvertTo-ALComparablePath $Entry
+    $Rules = @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]/FilePathRule') | Where-Object { (ConvertTo-ALComparablePath "$($_.Conditions.FilePathCondition.Path)") -eq $Want })
+    if (-not $Rules.Count) { return $null }
+    return , @($Rules | ForEach-Object { $_.SelectNodes('Exceptions/FilePathCondition') } | ForEach-Object { $_.GetAttribute('Path') })
+}
+
+# Rule collections this baseline manages: Exe, Msi, Script, Appx (+ Dll when DLL rules are on). Others in an effective policy - the DLL
+# collection when DLL rules are off, ManagedInstaller - come from other policies (e.g. the local MECM managed-installer policy).
+function Get-ALManagedCollections([bool]$DllRules) { return @('Exe', 'Msi', 'Script', 'Appx') + @(if ($DllRules) { 'Dll' }) }
+function Get-ALExpectedMode([string]$Mode, [string]$Type, [bool]$DllRules) {
+    if ($Type -eq 'Dll' -and -not $DllRules) { return 'NotConfigured' }
+    if ($Mode -eq 'Audit') { return 'AuditOnly' } else { return 'Enabled' }
+}
+# The managed collections of an effective policy that are missing or in the wrong mode for Audit / Enforce (nothing = as expected)
+function Get-ALPolicyMismatch([xml]$Policy, [string]$Mode, [bool]$DllRules) {
+    $Cols = @{}
+    foreach ($Rc in @($Policy.AppLockerPolicy.RuleCollection)) { $Cols["$($Rc.Type)"] = "$($Rc.EnforcementMode)" }
+    foreach ($T in Get-ALManagedCollections $DllRules) {
+        $Want = Get-ALExpectedMode $Mode $T $DllRules
+        if (-not $Cols.ContainsKey($T)) { "$T missing (expected $Want)" }
+        elseif ($Cols[$T] -ne $Want) { "$T=$($Cols[$T]) (expected $Want)" }
+    }
 }
 
 # Group Policy refresh over WinRM. The first refresh after a computer receives the GPO starts Application Identity;

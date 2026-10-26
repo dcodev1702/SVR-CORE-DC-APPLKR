@@ -20,9 +20,10 @@
     # non-admin account or a non-elevated session starts). Fixed local or UNC paths only; a folder ends in \*.
     # Typical MECM / SQL examples when they are installed on another drive (site systems - a separate settings file):
     #   'D:\Program Files\Microsoft Configuration Manager\*', 'D:\Program Files\Microsoft SQL Server\*'
-    # Every entry MUST be changeable by administrators only - otherwise it is a bypass. 0_AL_pre-flight.ps1, 1_AL_build_policy.ps1 and
-    # 4_AL_validate.ps1 check every folder and file in it (README, "C:\Admin"). Never add C:\Temp, C:\Sysmon, a user profile or a share
-    # that users can write to.
+    # Each entry should be changeable by administrators only. 1_AL_build_policy.ps1 checks every folder and file in it on EVERY server in
+    # scope and never stops on what it finds: an entry a non-admin can change is left out of the policy, and items inside it that a
+    # non-admin can change become exceptions - so the policy never allows them (README, "C:\Admin"). 0_AL_pre-flight.ps1 warns ahead of
+    # time; 4_AL_validate.ps1 fails only if a DC still allows such an item. Never add C:\Temp, C:\Sysmon, a user profile or a writable share.
     ExtraAllowedPaths = @('C:\Admin\*')
 
     # Folders that 0_AL_secure_folders.ps1 creates (when missing) administrators-only on every server in scope. An existing folder is only
