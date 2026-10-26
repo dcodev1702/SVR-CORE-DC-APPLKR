@@ -1,0 +1,10 @@
+# Run artifacts stay on the management computer (environment-specific: domain names, scan results, transcripts)
+/Logs/
+/Outputs/
+
+# AaronLocker writes these only when it is run in place; the scripts run it on the reference server instead
+/AaronLocker/AaronLocker/Outputs/
+/AaronLocker/AaronLocker/ScanResults/
+/AaronLocker/AaronLocker/MergeRules-Dynamic/
+/AaronLocker/AaronLocker/CustomizationInputs/ExtraAllowedPaths.txt
+/AaronLocker/AaronLocker/CustomizationInputs/KnownAdmins.txt
