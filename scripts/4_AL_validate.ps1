@@ -44,11 +44,12 @@ $Probe = {
     if ($site) { $more += (Join-Path $site 'bin\x64\smsexec.exe') }
     foreach ($e in $Extra) {
         $dir = $e -replace '\\\*$', ''
-        if (Test-Path -LiteralPath $dir -PathType Container) { $more += @(Get-ChildItem -LiteralPath $dir -Recurse -File -Include *.exe, *.ps1, *.cmd, *.bat -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName }) }
+        # (-Include is ignored with -LiteralPath, so the type filter is a Where-Object: only files AppLocker can evaluate)
+        if (Test-Path -LiteralPath $dir -PathType Container) { $more += @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe', '.ps1', '.cmd', '.bat' } | Select-Object -First 1 | ForEach-Object { $_.FullName }) }
     }
     foreach ($m in $more) { if ($m -and (Test-Path -LiteralPath $m)) { $files += @{ Path = $m; User = 'Everyone' }; $files += @{ Path = $m; User = 'BUILTIN\Administrators' } } }
     $o.Tests = foreach ($t in $files) {
-        try { $r = Test-AppLockerPolicy -PolicyObject $pol -Path $t.Path -User $t.User; [pscustomobject]@{ File = $t.Path; User = $t.User; Decision = "$($r.PolicyDecision)"; Rule = "$($r.MatchingRule)" } }
+        try { $r = Test-AppLockerPolicy -PolicyObject $pol -Path $t.Path -User $t.User -ErrorAction Stop; [pscustomobject]@{ File = $t.Path; User = $t.User; Decision = "$($r.PolicyDecision)"; Rule = "$($r.MatchingRule)" } }
         catch { [pscustomobject]@{ File = $t.Path; User = $t.User; Decision = 'ERROR'; Rule = $_.Exception.Message } }
     }
     # Core DC services, plus MECM client and Nessus Agent when installed (only services that exist are listed)
