@@ -8,6 +8,9 @@
 > [!IMPORTANT]
 > **Run end to end in the lab on 2026-10-26** (one Server Core 2025 domain controller): build → GPOs → Audit → review → **Enforce** → STIG check. Result: **WN25-00-000080 / V-277992 = NotAFinding**, `dcdiag` 26/26 passed in Enforce, 0 blocked events ([Appendix A](#appendix-a--lab-verification-2026-10-26)). The lab has **no MECM and no Nessus**: those sections are design analysis checked against Microsoft documentation. **The Audit period in your network is the proof — do not skip it.**
 
+> [!TIP]
+> **Server Core 2022 DCs, or a mix of 2022 and 2025?** The steps are the same, with three differences: build the policy on a DC that runs the same Windows Server version, remove PowerShell 2.0, and record the Server 2022 STIG IDs (**WN22-00-000080 / V-254245**). See **[AppLocker on Server Core 2022 domain controllers](SERVER-2022.md)**.
+
 ---
 
 ## Contents
@@ -30,6 +33,7 @@
 - [Appendix C — Event IDs](#appendix-c--event-ids)
 - [Appendix D — Troubleshooting](#appendix-d--troubleshooting)
 - [Appendix E — Design decisions and limits](#appendix-e--design-decisions-and-limits)
+- [Server Core 2022 domain controllers](SERVER-2022.md) — separate page
 
 ---
 
@@ -73,7 +77,7 @@ Both GPOs also set **System Services → Application Identity = Automatic** (`Gp
 
 ```
 SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer, e.g. C:\SVR-CORE-DC-APPLKR
-  README.md  THIRD-PARTY-NOTICES.md
+  README.md  SERVER-2022.md  THIRD-PARTY-NOTICES.md
   scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_AL_stig_check.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
@@ -99,8 +103,8 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
 | **Management computer** | Windows 10/11 or Windows Server, **Windows PowerShell 5.1 or PowerShell 7**, RSAT **Group Policy Management** and **Active Directory** modules, and the built-in `AppLocker` module. |
 | **RSAT without Internet** | Windows Server: `Install-WindowsFeature GPMC, RSAT-AD-PowerShell` (the payload is on the server). Windows 11: `Add-WindowsCapability -Online -Name Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0 -Source <Features on Demand media> -LimitAccess` (same for `Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0`), or deploy the capability with MECM/WSUS. |
 | **Account** | Domain Admin (or: create/link GPOs, write SYSVOL, WinRM administrator on the DCs). |
-| **WinRM** | Enabled on every DC (default on Server 2025). Test: `Invoke-Command -ComputerName <dc> { $env:COMPUTERNAME }`. |
-| **Reference DC** | Any DC in scope — DCs are built alike; the PDC emulator is a good choice. It must be in `FullLanguage` mode (no WDAC/AppLocker already restricting PowerShell for admins). If MECM or a Nessus Agent are on your DCs, they must be on the reference DC too. |
+| **WinRM** | Enabled on every DC (default on Windows Server 2022 and 2025). Test: `Invoke-Command -ComputerName <dc> { $env:COMPUTERNAME }`. |
+| **Reference DC** | Any DC in scope — DCs are built alike; the PDC emulator is a good choice. It must be in `FullLanguage` mode (no WDAC/AppLocker already restricting PowerShell for admins). If MECM or a Nessus Agent are on your DCs, they must be on the reference DC too. On **Server 2022**, or with DCs of both versions, read [SERVER-2022.md](SERVER-2022.md) first. |
 | **Execution policy** | AaronLocker's scripts are not signed. If Group Policy sets *Turn on Script Execution* to *Allow only signed scripts* (AllSigned) on the reference DC or the management computer, sign the scripts with your code-signing certificate or run from a host the GPO does not cover. Pre-flight checks the reference DC. |
 | **Servers** | **No Internet.** They receive a temporary folder over WinRM during the build (`C:\AaronLocker`, deleted afterwards) and Group Policy. |
 
@@ -294,6 +298,8 @@ The effective policy must now read `Exe/Msi/Script/Appx = Enabled`, `Dll = NotCo
 .\6_AL_stig_check.ps1
 ```
 Per DC: **WN25-00-000080 / V-277992 (CAT II)**, status **NotAFinding** or **Open**, and the values behind it — every rule collection (mode and rule count), Application Identity, the enabled AppLocker GPO link, blocked events in the last 24 hours. It runs the STIG's own check command (`Get-AppLockerPolicy -Effective -XML`) and saves each DC's effective policy as evidence (`Outputs\<profile>\stig-<ts>\<DC>-effective-applocker.xml` + SHA-256), with the results in `Logs\6_AL_stig_check-<ts>.csv`. Open = Application Identity not running, or the EXE collection not `Enabled` (Audit is a finding), or no EXE rules.
+
+**Server 2022 DCs:** the status is right, but record it under **WN22-00-000080 / V-254245** ([SERVER-2022.md, section 4](SERVER-2022.md#4-record-the-server-2022-stig-ids)).
 
 ---
 
@@ -569,7 +575,7 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 
 ## Appendix E — Design decisions and limits
 
-- **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class.
+- **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class, down to its Windows Server version ([SERVER-2022.md](SERVER-2022.md)).
 - **Two GPOs, one enabled link**, so Audit and Enforce never merge and switching is one command. Both GPOs carry the full rule set and the service setting.
 - **DLL rules off** — not required by WN25-00-000080; they add overhead and a high rule-maintenance burden. `EnableDllRules = $true` switches them on (`AuditOnly` / `Enabled` like the rest).
 - **No services enforcement in this baseline** — services are not evaluated (AppLocker's default) unless MECM's managed installer turns it on through its local policy; the baseline is safe either way on DCs (services run as SYSTEM or from the allowed folders).
