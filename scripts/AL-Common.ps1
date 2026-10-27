@@ -10,8 +10,10 @@
       - results and evidence: New-ALResults, Add-ALResult, Write-ALResults (table + CSV + PASSED / FAILED line), Stop-ALTranscript
       - the domain and GPOs: Get-ALDomainInfo, Resolve-ALTargetOUs, Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
         Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
+      - Windows Server versions and STIG items: ConvertTo-ALOsBuild, Get-ALOsLabel, Get-ALStigItem, Get-ALAdOsBuild
       - the build: Get-ALBuildFolder, New-ALDeployXml, Get-ALPolicySummary, Add-ALPathExceptions, Get-ALRuleExceptions,
-        Get-ALExtraPathPlan, Get-ALExpectedMode, Get-ALPolicyMismatch, Get-ALManagedCollections
+        Get-ALExtraPathPlan, Get-ALExpectedMode, Get-ALPolicyMismatch, Get-ALManagedCollections, Merge-ALScanResults,
+        ConvertTo-ALAaronLockerPath, Get-ALMissingScanEntries
       - permissions: $ALWritableCheck (runs on a server: who can change an ExtraAllowedPaths / SecureFolders item),
         Invoke-ALWritableCheck, Test-ALPathUnder, Test-ALCovered, ConvertTo-ALComparablePath
       - KnownAdmins: Test-ALNeverAdmin, Test-ALBuiltInAdminSid, Split-ALCanonicalName, ConvertTo-ALLdapFilterValue,
@@ -62,6 +64,7 @@ function Test-ALModule([string]$Name) {
 function New-ALDefaultSettings {
     return @{
         ReferenceServer   = ''
+        ExtraReferenceServers = @()
         TargetOUs         = @()
         ExtraAllowedPaths = @()
         SecureFolders     = @()
@@ -111,6 +114,9 @@ function Assert-ALSettings($Cfg, [string]$SettingsFile) {
     foreach ($Key in 'AuditGpoName', 'EnforceGpoName') { if (-not $Cfg[$Key]) { throw "STOP: setting '$Key' is empty ($SettingsFile)." } }
     if ($Cfg.AuditGpoName -eq $Cfg.EnforceGpoName) { throw 'STOP: AuditGpoName and EnforceGpoName must be different.' }
     if ($Cfg.ReferenceServer -and $Cfg.ReferenceServer -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') { throw "STOP: ReferenceServer '$($Cfg.ReferenceServer)' is not a computer name. Use the FQDN, e.g. dc01.contoso.com." }
+    foreach ($S in @($Cfg.ExtraReferenceServers | Where-Object { $_ })) {
+        if ("$S" -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') { throw "STOP: ExtraReferenceServers entry '$S' is not a computer name. Use the FQDN, e.g. dc22-01.contoso.com." }
+    }
     foreach ($P in @($Cfg.ExtraAllowedPaths)) {
         if ("$P" -notmatch '^(?:[A-Za-z]:\\[^*?"<>|:]*[^\\*?"<>|:]|\\\\[^\\*?"<>|]+\\[^\\*?"<>|]+(?:\\[^*?"<>|]*[^\\*?"<>|])?)(?:\\\*)?$') {
             throw "STOP: ExtraAllowedPaths entry '$P' is not allowed. Use a fixed local or UNC folder ending in \* (or a single file): no drive root, no other wildcards, no %variables%."
@@ -295,6 +301,44 @@ function Get-ALTargetComputers([string[]]$Ous, $Domain) {
             Where-Object { $_.OperatingSystem -like 'Windows Server*' } | ForEach-Object { if ($_.DNSHostName) { $_.DNSHostName } else { $_.Name } }
     }
     return @($Names | Sort-Object -Unique)
+}
+
+# Windows build number from a version string: '10.0.26100' (Win32_OperatingSystem) or '10.0 (26100)' (AD operatingSystemVersion);
+# 0 when there is none
+function ConvertTo-ALOsBuild([string]$Version) {
+    $Build = 0
+    if ($Version -match '\((\d{1,9})\)' -or $Version -match '^\s*\d+\.\d+\.(\d{1,9})') { [void][int]::TryParse($Matches[1], [ref]$Build) }
+    return $Build
+}
+
+# 'Windows Server 2025 (build 26100)' for the Windows Server builds this toolkit names, 'Windows build <n>' for any other
+function Get-ALOsLabel([int]$Build) {
+    if ($Build -le 0) { return 'unknown version' }
+    $Name = switch ($Build) { 14393 { 'Windows Server 2016' } 17763 { 'Windows Server 2019' } 20348 { 'Windows Server 2022' } 26100 { 'Windows Server 2025' } default { '' } }
+    if ($Name) { return "$Name (build $Build)" }
+    return "Windows build $Build"
+}
+
+# The DISA STIG item this toolkit meets ("deny-all, permit-by-exception") for a Windows Server build: 26100 = Windows Server 2025,
+# 20348 = Windows Server 2022. $null for any other build: no mapping, so the STIG check reports Not_Reviewed instead of a wrong ID.
+# Rule IDs (SV-...) change with every STIG revision; the STIG ID and the V-ID do not.
+function Get-ALStigItem([int]$Build) {
+    $Text = 'must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.'
+    switch ($Build) {
+        26100 { return [ordered]@{ StigId = 'WN25-00-000080'; VulnId = 'V-277992'; Severity = 'CAT II'; Title = "Windows Server 2025 $Text" } }
+        20348 { return [ordered]@{ StigId = 'WN22-00-000080'; VulnId = 'V-254245'; Severity = 'CAT II'; Title = "Windows Server 2022 $Text" } }
+    }
+    return $null
+}
+
+# Windows build of a computer from its AD account (operatingSystemVersion, e.g. '10.0 (26100)'), found by DNS host name or computer
+# name; 0 when there is no single matching account or it carries no version. For servers that cannot be reached over WinRM.
+function Get-ALAdOsBuild([string]$ComputerName, $Domain) {
+    $Short = ($ComputerName -split '\.')[0]
+    $Filter = '(|(dNSHostName={0})(sAMAccountName={1}$))' -f (ConvertTo-ALLdapFilterValue $ComputerName), (ConvertTo-ALLdapFilterValue $Short)
+    try { $Found = @(Get-ADComputer -LDAPFilter $Filter -Properties OperatingSystemVersion -Server $Domain.PDC -ErrorAction Stop) } catch { return 0 }
+    if ($Found.Count -ne 1) { return 0 }
+    return (ConvertTo-ALOsBuild "$($Found[0].OperatingSystemVersion)")
 }
 
 # AD and SYSVOL locations of a GPO (writes go to the PDC emulator)
@@ -580,6 +624,82 @@ function Get-ALRuleExceptions([xml]$Policy, [string]$Entry) {
     $Rules = @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]/FilePathRule') | Where-Object { (ConvertTo-ALComparablePath "$($_.Conditions.FilePathCondition.Path)") -eq $Want })
     if (-not $Rules.Count) { return $null }
     return , @($Rules | ForEach-Object { $_.SelectNodes('Exceptions/FilePathCondition') } | ForEach-Object { $_.GetAttribute('Path') })
+}
+
+# Merges the AaronLocker scan results of several servers into $OutFolder: every user-writable folder (Writable_windir/PF/PF86.txt, one
+# path per line, ASCII) and every deny-list entry (ExeDenyListData.txt, CSV PublisherName,ProductName,BinaryName, UTF-16) that ANY of
+# them found. A union can only take permissions away (more folders excepted, more tools denied); it never allows more. $Scans: one
+# @{ Server = <name>; Folder = <its ScanResults copy> } per server, the build's reference server first. Returns Writable (every merged
+# path), Deny (every merged entry) and Added (Server / File / Entry for what the other servers add to the first one's scan).
+function Merge-ALScanResults([object[]]$Scans, [string]$OutFolder) {
+    New-Item -Path $OutFolder -ItemType Directory -Force -WhatIf:$false | Out-Null
+    $Added = New-Object System.Collections.Generic.List[object]
+    $Writable = New-Object System.Collections.Generic.List[string]
+    foreach ($File in 'Writable_windir.txt', 'Writable_PF.txt', 'Writable_PF86.txt') {
+        $Seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $Lines = New-Object System.Collections.Generic.List[string]
+        for ($I = 0; $I -lt $Scans.Count; $I++) {
+            $Path = Join-Path $Scans[$I].Folder $File
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "STOP: $File is missing from the scan of $($Scans[$I].Server) ($($Scans[$I].Folder)). Nothing was deployed." }
+            foreach ($Line in [IO.File]::ReadAllLines($Path)) {
+                if ($Line.Trim() -eq '' -or -not $Seen.Add($Line)) { continue }
+                $Lines.Add($Line)
+                if ($I -gt 0) { $Added.Add([pscustomobject]@{ Server = $Scans[$I].Server; File = $File; Entry = $Line }) }
+            }
+        }
+        # The same format AaronLocker writes (ASCII, CRLF); an empty list is an empty file
+        $Text = if ($Lines.Count) { ($Lines.ToArray() -join "`r`n") + "`r`n" } else { '' }
+        [IO.File]::WriteAllText((Join-Path $OutFolder $File), $Text, (New-Object System.Text.ASCIIEncoding))
+        $Writable.AddRange($Lines)
+    }
+    $Seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $Deny = New-Object System.Collections.Generic.List[object]
+    for ($I = 0; $I -lt $Scans.Count; $I++) {
+        $Path = Join-Path $Scans[$I].Folder 'ExeDenyListData.txt'
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "STOP: ExeDenyListData.txt is missing from the scan of $($Scans[$I].Server) ($($Scans[$I].Folder)). Nothing was deployed." }
+        $Text = [IO.File]::ReadAllLines($Path)
+        if (@($Text | Where-Object { $_.Trim() }).Count -and $Text[0] -notmatch '^"?PublisherName"?,"?ProductName"?,"?BinaryName"?$') { throw "STOP: ExeDenyListData.txt from $($Scans[$I].Server) is not an AaronLocker deny list (header '$($Text[0])'). Nothing was deployed." }
+        foreach ($Row in @($Text | ConvertFrom-Csv)) {
+            if (-not $Seen.Add("$($Row.PublisherName)|$($Row.ProductName)|$($Row.BinaryName)")) { continue }
+            $Deny.Add([pscustomobject]@{ PublisherName = "$($Row.PublisherName)"; ProductName = "$($Row.ProductName)"; BinaryName = "$($Row.BinaryName)" })
+            if ($I -gt 0) { $Added.Add([pscustomobject]@{ Server = $Scans[$I].Server; File = 'ExeDenyListData.txt'; Entry = "$($Row.BinaryName) ($($Row.ProductName))" }) }
+        }
+    }
+    # UTF-16 LE with BOM and every field quoted, as AaronLocker writes it (ConvertTo-Csv quotes every field in both editions)
+    $Csv = [string[]]@($Deny | Select-Object PublisherName, ProductName, BinaryName | ConvertTo-Csv -NoTypeInformation)
+    [IO.File]::WriteAllLines((Join-Path $OutFolder 'ExeDenyListData.txt'), $Csv, (New-Object System.Text.UnicodeEncoding $false, $true))
+    [pscustomobject]@{ Writable = $Writable.ToArray(); Deny = $Deny.ToArray(); Added = $Added.ToArray() }
+}
+
+# A user-writable folder from a scan as AaronLocker writes it into the rules: the reference server's System32 / SysWOW64 become
+# %SYSTEM32%, its Windows folder %WINDIR%, both Program Files folders %PROGRAMFILES%; any other path stays as it is. $Roots: Windir,
+# ProgramFiles, ProgramFilesX86 of the server the rules are generated on. Compare the result case-insensitively (AaronLocker lower-cases).
+function ConvertTo-ALAaronLockerPath([string]$Line, $Roots) {
+    $Map = New-Object System.Collections.Generic.List[object]
+    if ($Roots.Windir) {
+        $Map.Add(@(($Roots.Windir.TrimEnd('\') + '\System32\'), '%SYSTEM32%\'))
+        $Map.Add(@(($Roots.Windir.TrimEnd('\') + '\SysWOW64\'), '%SYSTEM32%\'))
+        $Map.Add(@(($Roots.Windir.TrimEnd('\') + '\'), '%WINDIR%\'))
+    }
+    foreach ($Pf in @($Roots.ProgramFilesX86, $Roots.ProgramFiles)) { if ($Pf) { $Map.Add(@(($Pf.TrimEnd('\') + '\'), '%PROGRAMFILES%\')) } }
+    foreach ($M in $Map) { if ($Line.StartsWith($M[0], [StringComparison]::OrdinalIgnoreCase)) { return $M[1] + $Line.Substring($M[0].Length) } }
+    return $Line
+}
+
+# What a merged scan holds that an AaronLocker policy does not - empty is the proof that the rules were generated from the merged scan.
+# Every user-writable folder must be an exception path in the EXE collection, every deny-list entry a publisher exception there.
+function Get-ALMissingScanEntries([xml]$Policy, $Merge, $Roots) {
+    $Paths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($C in @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]//Exceptions/FilePathCondition'))) { [void]$Paths.Add($C.GetAttribute('Path')) }
+    $Pubs = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($C in @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]//Exceptions/FilePublisherCondition'))) { [void]$Pubs.Add("$($C.GetAttribute('PublisherName'))|$($C.GetAttribute('ProductName'))|$($C.GetAttribute('BinaryName'))") }
+    foreach ($Line in @($Merge.Writable)) {
+        $Want = ConvertTo-ALAaronLockerPath $Line $Roots
+        if (-not $Paths.Contains($Want)) { "user-writable folder $Line (expected exception $Want)" }
+    }
+    foreach ($D in @($Merge.Deny)) {
+        if (-not $Pubs.Contains("$($D.PublisherName)|$($D.ProductName)|$($D.BinaryName)")) { "deny-list entry $($D.BinaryName) ($($D.ProductName))" }
+    }
 }
 
 # Rule collections this baseline manages: Exe, Msi, Script, Appx (+ Dll when DLL rules are on). Others in an effective policy - the DLL

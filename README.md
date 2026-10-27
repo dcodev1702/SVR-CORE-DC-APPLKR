@@ -9,7 +9,7 @@
 > **Run end to end in the lab on 2026-10-26** (one Server Core 2025 domain controller): build → GPOs → Audit → review → **Enforce** → STIG check. Result: **WN25-00-000080 / V-277992 = NotAFinding**, `dcdiag` 26/26 passed in Enforce, 0 blocked events ([Appendix A](#appendix-a--lab-verification-2026-10-26)). The lab has **no MECM and no Nessus**: those sections are design analysis checked against Microsoft documentation. **The Audit period in your network is the proof — do not skip it.**
 
 > [!TIP]
-> **Server Core 2022 DCs, or a mix of 2022 and 2025?** The steps are the same, with three differences: build the policy on a DC that runs the same Windows Server version, remove PowerShell 2.0, and record the Server 2022 STIG IDs (**WN22-00-000080 / V-254245**). See **[AppLocker on Server Core 2022 domain controllers](SERVER-2022.md)**.
+> **Server Core 2022 DCs, or a mix of 2022 and 2025?** The steps are the same. With both versions, list one DC of the other version in `ExtraReferenceServers`: the build scans it too and merges the scans. Pre-flight warns about a DC whose version no reference DC runs and about an installed PowerShell 2.0, and the STIG check reports 2022 DCs under **WN22-00-000080 / V-254245**. See **[AppLocker on Server Core 2022 domain controllers](SERVER-2022.md)**.
 
 ---
 
@@ -104,9 +104,9 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
 | **RSAT without Internet** | Windows Server: `Install-WindowsFeature GPMC, RSAT-AD-PowerShell` (the payload is on the server). Windows 11: `Add-WindowsCapability -Online -Name Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0 -Source <Features on Demand media> -LimitAccess` (same for `Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0`), or deploy the capability with MECM/WSUS. |
 | **Account** | Domain Admin (or: create/link GPOs, write SYSVOL, WinRM administrator on the DCs). |
 | **WinRM** | Enabled on every DC (default on Windows Server 2022 and 2025). Test: `Invoke-Command -ComputerName <dc> { $env:COMPUTERNAME }`. |
-| **Reference DC** | Any DC in scope — DCs are built alike; the PDC emulator is a good choice. It must be in `FullLanguage` mode (no WDAC/AppLocker already restricting PowerShell for admins). If MECM or a Nessus Agent are on your DCs, they must be on the reference DC too. On **Server 2022**, or with DCs of both versions, read [SERVER-2022.md](SERVER-2022.md) first. |
-| **Execution policy** | AaronLocker's scripts are not signed. If Group Policy sets *Turn on Script Execution* to *Allow only signed scripts* (AllSigned) on the reference DC or the management computer, sign the scripts with your code-signing certificate or run from a host the GPO does not cover. Pre-flight checks the reference DC. |
-| **Servers** | **No Internet.** They receive a temporary folder over WinRM during the build (`C:\AaronLocker`, deleted afterwards) and Group Policy. |
+| **Reference DC** | Any DC in scope — DCs are built alike; the PDC emulator is a good choice. It must be in `FullLanguage` mode (no WDAC/AppLocker already restricting PowerShell for admins). If MECM or a Nessus Agent are on your DCs, they must be on the reference DC too. It must run the DCs' Windows Server version; with DCs of two versions, list one of the other version in `ExtraReferenceServers` ([SERVER-2022.md](SERVER-2022.md)). |
+| **Execution policy** | AaronLocker's scripts are not signed. If Group Policy sets *Turn on Script Execution* to *Allow only signed scripts* (AllSigned) on the reference DC or the management computer, sign the scripts with your code-signing certificate or run from a host the GPO does not cover. Pre-flight checks the reference DC and every extra reference DC. |
+| **Servers** | **No Internet.** They receive a temporary folder over WinRM during the build (`C:\AaronLocker` on the reference DC, `C:\AaronLocker-1`, `-2` … on extra reference DCs, deleted afterwards) and Group Policy. |
 
 ---
 
@@ -129,7 +129,7 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
    Expected: `AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit), SHA-256 843B6B1D...F9F3 (pinned)` and `Toolkit ready`.
 
 > [!TIP]
-> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 150 passed`.
+> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 182 passed`.
 
 ---
 
@@ -142,6 +142,7 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 | `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JSLC_AppLocker_AUDIT_Domain_Controller` / `JSLC_AppLocker_ENFORCE_Domain_Controller` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
 | `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC25-1.skynet-home.local` (the lab DC) |
+| `ExtraReferenceServers` | DCs of **another Windows Server version** in scope, one per version (e.g. a Server 2022 DC next to 2025 DCs). The build scans them too and merges every user-writable folder and denied tool they find: stricter only ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) | empty |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
 | `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
@@ -167,15 +168,15 @@ Every script carries comment-based help: `Get-Help .\<script>.ps1 -Full` shows i
 |---|---|---|---|
 | 1 | `0_AL_get_toolkit.ps1` | Verifies AaronLocker + AccessChk (signature, 64-bit, pinned SHA-256) | nothing (`-Download` / import only when asked) |
 | 2 | `0_AL_known_admins.ps1 -Path <OU or group>` | Optional: surveys the OU of your administrator accounts (shows their groups), or turns your administrators groups (canonical name, as ADUC shows it) into `KnownAdmins` entries; `-Update` writes them | nothing (`-Update`: `AL-Settings.psd1`, after a backup) |
-| 2 | `0_AL_pre-flight.ps1` | Modules, rights, OUs, toolkit, WinRM, language mode, execution policy, existing AppLocker policy, **MECM**, **Nessus**, services/tasks outside the allowed folders, **`C:\Admin` permissions** | read-only |
+| 2 | `0_AL_pre-flight.ps1` | Modules, rights, OUs, toolkit, WinRM, language mode, execution policy, existing AppLocker policy, **MECM**, **Nessus**, services/tasks outside the allowed folders, **`C:\Admin` permissions**, **Windows Server version of every DC vs the reference DCs**, **PowerShell 2.0** | read-only |
 | 3 | `0_AL_secure_folders.ps1` | Creates a missing `C:\Admin` administrators-only; reports a writable one | DCs (only a **missing** folder; an existing one only with `-Fix`) |
-| 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC, checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back | temporary folder on the reference DC |
+| 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC (merging the scans of any `ExtraReferenceServers`), checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back | temporary folder on the reference DC (and each extra reference DC) |
 | 5 | `2_AL_create_gpos.ps1` | Backs up, creates/updates the Audit + Enforce GPOs, reads the rules back, links new GPOs **disabled**, sizes the logs | domain (GPOs), DCs (log size) |
 | 6 | `3_AL_set_mode.ps1 -Mode Audit -Refresh` | Enables the Audit link, refreshes the DCs | domain (links) |
 | 6 | `4_AL_validate.ps1` | GPOs, links, rules, service, effective policy, decisions, DC services, `C:\Admin`, events | read-only |
 | 7 | `5_AL_review_events.ps1` | Summarises would-be-blocked events (tags MECM / NESSUS / ADMIN / SYSVOL), CSV | read-only |
 | 8 | `3_AL_set_mode.ps1 -Mode Enforce -Refresh` | Disables Audit, enables Enforce, refreshes | domain (links) |
-| 9 | `6_AL_stig_check.ps1` | WN25-00-000080 / V-277992 per DC: status + values + evidence XML | read-only |
+| 9 | `6_AL_stig_check.ps1` | Per DC, the STIG item for its version (WN25-00-000080 / V-277992 or WN22-00-000080 / V-254245): status + values + evidence XML | read-only |
 
 Every script that changes something shows the change in **yellow** and asks `Continue? [Y/N]`; **`-NoConfirm`** skips the prompt for automation, a non-interactive session without `-NoConfirm` stops before changing anything, and **`-WhatIf`** shows the plan without changing anything. Every run writes a transcript to `Logs\`; the read-only checks also write their results table as CSV and exit with code 1 on a failure.
 
@@ -205,7 +206,9 @@ It must end with **`Pre-flight: PASSED`**. Fix every **FAIL**; read every **WARN
 | Output | Means | Do |
 |---|---|---|
 | `Reference server: not set` | `ReferenceServer` is empty | set it (any DC in scope) |
-| `Execution policy … AllSigned` (FAIL on the reference DC) | AaronLocker cannot run there | [section 3](#3-prerequisites) |
+| `Execution policy … AllSigned` (FAIL on the reference DC or an extra reference DC) | AaronLocker cannot run there | [section 3](#3-prerequisites) |
+| `Version <DC>` (WARN) | That DC runs a Windows Server version (or installation type) that no reference DC runs. The build scans only the reference DCs for user-writable folders, so a folder only that version makes writable would stay allowed | add a DC like it to `ExtraReferenceServers` ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) |
+| `PowerShell 2.0 <DC>` (WARN) | The `PowerShell-V2` feature is installed (Server 2022): `powershell.exe -Version 2` runs without Constrained Language Mode. STIG WN22-00-000410 | remove it ([SERVER-2022.md, section 3](SERVER-2022.md#3-remove-powershell-20-from-the-2022-dcs)) |
 | `Extra path writable` (WARN) | An account that is not an administrator can change something in `C:\Admin`. The build will **leave `C:\Admin` out** of the policy (if the folder itself is writable) or **except** that item — the policy never allows it, and nothing breaks | to keep it allowed for everyone: remove that access, or list the group in `KnownAdmins` if it **is** an administrators group ([section 8](#cadmin-ctemp-and-csysmon)) |
 | `Extra path missing` | `C:\Admin` does not exist on that DC | step 3 |
 | `Task outside allowed folders` | A scheduled task runs a program or script from outside the allowed folders as a non-SYSTEM account — **blocked in Enforce** unless that account is an elevated administrator | move the file, or add its folder to `ExtraAllowedPaths` (administrators-only!) |
@@ -241,7 +244,9 @@ Extra allowed path: C:\Admin\* - allowed for every account EXCEPT (non-admins ca
 Extra allowed path: C:\Admin\* - LEFT OUT of the policy: changeable by BUILTIN\Users on dc02. ... Fix its permissions and rebuild to allow it.
 ```
 
-Results: `AppLockerRules-<ts>-Audit.xml`, `…-Enforce.xml`, `ScanResults\Writable_*.txt` (the user-writable folders excluded from the allow rules), `build-info.json` (settings, the `C:\Admin` decision per entry, SHA-256 of the rule files). Harmless: `FILE SYSTEM OBJECT DOES NOT EXIST …OneDrive` (a desktop-only sample).
+Results: `AppLockerRules-<ts>-Audit.xml`, `…-Enforce.xml`, `ScanResults\Writable_*.txt` (the user-writable folders excluded from the allow rules), `build-info.json` (settings, the servers scanned and their versions, the `C:\Admin` decision per entry, SHA-256 of the rule files). Harmless: `FILE SYSTEM OBJECT DOES NOT EXIST …OneDrive` (a desktop-only sample).
+
+**DCs of more than one Windows Server version** (`ExtraReferenceServers`): the build also scans each extra reference DC, merges every user-writable folder and denied tool that any DC found (stricter only), generates the rules again on the reference DC from the merged scan, and checks that the rules carry every merged entry — otherwise it stops and deploys nothing. It lists what the other DCs added, keeps each DC's own scan in `ScanResults-<DC>\`, and warns when a DC in the target OUs runs a version that no scanned DC runs ([SERVER-2022.md, section 2](SERVER-2022.md#dcs-of-both-versions)).
 
 > [!NOTE]
 > **Server Core:** several desktop binaries on AaronLocker's deny list (e.g. `mshta.exe`) are not installed, which makes the stock script fail. The `Customizations` overlay lists only files that exist — the scripts apply it automatically; do not edit the toolkit copy.
@@ -297,9 +302,9 @@ The effective policy must now read `Exe/Msi/Script/Appx = Enabled`, `Dll = NotCo
 ```powershell
 .\6_AL_stig_check.ps1
 ```
-Per DC: **WN25-00-000080 / V-277992 (CAT II)**, status **NotAFinding** or **Open**, and the values behind it — every rule collection (mode and rule count), Application Identity, the enabled AppLocker GPO link, blocked events in the last 24 hours. It runs the STIG's own check command (`Get-AppLockerPolicy -Effective -XML`) and saves each DC's effective policy as evidence (`Outputs\<profile>\stig-<ts>\<DC>-effective-applocker.xml` + SHA-256), with the results in `Logs\6_AL_stig_check-<ts>.csv`. Open = Application Identity not running, or the EXE collection not `Enabled` (Audit is a finding), or no EXE rules.
+Per DC: the STIG item for its Windows Server version — **WN25-00-000080 / V-277992 (CAT II)** on Server 2025, **WN22-00-000080 / V-254245 (CAT II)** on Server 2022 — status **NotAFinding** or **Open**, and the values behind it — every rule collection (mode and rule count), Application Identity, the enabled AppLocker GPO link, blocked events in the last 24 hours. It runs the STIG's own check command (`Get-AppLockerPolicy -Effective -XML`) and saves each DC's effective policy as evidence (`Outputs\<profile>\stig-<ts>\<DC>-effective-applocker.xml` + SHA-256), with the results in `Logs\6_AL_stig_check-<ts>.csv`. Open = Application Identity not running, or the EXE collection not `Enabled` (Audit is a finding), or no EXE rules.
 
-**Server 2022 DCs:** the status is right, but record it under **WN22-00-000080 / V-254245** ([SERVER-2022.md, section 4](SERVER-2022.md#4-record-the-server-2022-stig-ids)).
+The version comes from the DC (from AD when it can't be reached). A DC of another Windows version is **Not_Reviewed**, with the AppLocker result in the `Reason` column to record under that version's own STIG item ([SERVER-2022.md, section 4](SERVER-2022.md#4-the-server-2022-stig-ids)).
 
 ---
 
@@ -430,7 +435,7 @@ If nothing appears in step 2, leave `KnownAdmins` empty — even with ten accoun
 |---|---|
 | **New software / agent / role on the DCs** | Audit first if you can; add its folder or publisher, rebuild (steps 4–5) |
 | **Monthly patching** | Nothing — Microsoft-signed content under `C:\Windows`, installed as SYSTEM. Check `5_AL_review_events.ps1` after the first cycle |
-| **New DC** | It gets the active GPO at its next refresh (two refreshes or a reboot before the rules load). Run step 3 for `C:\Admin`, then `4_AL_validate.ps1` |
+| **New DC** | It gets the active GPO at its next refresh (two refreshes or a reboot before the rules load). Run step 3 for `C:\Admin`, then `4_AL_validate.ps1`. If it runs a Windows Server version the others don't, add it to `ExtraReferenceServers` and rebuild (pre-flight warns: `Version <DC>`) |
 | **Rebuild** | `1_AL_build_policy.ps1` → `2_AL_create_gpos.ps1`. In Enforce, switch to Audit first (`3_AL_set_mode.ps1 -Mode Audit -Refresh`), review, then Enforce again |
 | **Updating AccessChk** | On an Internet-connected computer: download AccessChk.zip, take `accesschk64.exe`, check `Get-AuthenticodeSignature` (Valid, Microsoft Corporation) and `Get-FileHash`. Put the new hash in `AccessChkSha256`, then `.\0_AL_get_toolkit.ps1 -AccessChkPath <accesschk64.exe>` (it refuses a file that does not match the pinned hash) |
 | **Audit evidence** | `6_AL_stig_check.ps1` (status + evidence XML) and `4_AL_validate.ps1` (CSV in `Logs\`) |
@@ -481,6 +486,21 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | A script in a GPO folder under `\\<domain>\SYSVOL\<domain>\Policies\` (logon scripts) | Allowed | Allowed |
 
 **Not verified in the lab:** MECM, Nessus, more than one DC, and a real block of a non-admin logon (no non-admin can log on to the lab DC).
+
+**2026-10-27 — Windows Server version handling** (version-aware STIG check, pre-flight version and PowerShell 2.0 checks, `ExtraReferenceServers`), re-verified on the same lab without changing the DC, its policy or any GPO (before/after snapshot):
+
+| Check | Edition | Result |
+|---|---|---|
+| `0_AL_pre-flight` | 5.1 + 7 | PASSED; `Versions` OK (Windows Server 2025, build 26100, Server Core); no PowerShell 2.0 row — the feature no longer exists on Server 2025 |
+| `0_AL_pre-flight` with a Windows 11 computer as the reference / as an extra reference | 5.1 / 7 | `Version DC25-1` WARN / `Versions` OK; the extra reference's `Restricted` execution policy FAILs |
+| `6_AL_stig_check` | 5.1 + 7 | **WN25-00-000080 / V-277992: NotAFinding** (item chosen from build 26100) |
+| `6_AL_stig_check` with an unknown host listed first and a Windows 11 computer | 5.1 + 7 | both `Not_Reviewed` (no STIG ID claimed), the DC still NotAFinding, every CSV column kept |
+| `1_AL_build_policy` (test profile, no extra reference) | 5.1 | rules identical to the deployed build (62 rules each in Audit and Enforce, ignoring rule IDs and the timestamp rule) |
+| `1_AL_build_policy -ExtraReferenceServers DC25-1` (the same DC by its short name) | 7 | same-computer warning; scan, merge, rules generated again from the merged scan, self-check passed (16 folders, 9 tools); rules identical to the deployed build |
+| A simulated second scan with one extra folder and one extra tool | 5.1 | both in the regenerated rules; the self-check flags a policy without them |
+| `1_AL_build_policy` with an extra reference that can't run AaronLocker | 5.1 | STOP before the first scan; the DC's work folder removed, nothing written on the refused computer, `latest.txt` unchanged |
+| `2_AL_create_gpos -WhatIf` on the merged build (compare-only GPO names) | 5.1 + 7 | picks the merged rule files; no GPO created |
+| `tests\Test-AL.ps1` | 5.1 + 7 | 182/182; 188/188 with `-BuildFolder` (the real build and the merged build) |
 
 ---
 
@@ -562,6 +582,10 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 | `STOP: no build in …Outputs\…` / build folder not found | Run step 4, or pass `-OutputFolder` |
 | Build output: *`C:\Admin\*` - LEFT OUT of the policy* or *… EXCEPT …* | A non-admin can change `C:\Admin` (or items in it) on the DC named. The build continued safely. To allow it again: remove that access (or list the group in `KnownAdmins` if it is an administrators group), then rebuild (steps 4–5) |
 | Validation FAIL: *… AND allowed for every account - a bypass* | A DC's `C:\Admin` became writable **after** the build. Rebuild (steps 4–5): the build excludes it |
+| Pre-flight WARN `Version <DC>`, or build warning *… runs Windows Server 2022 …, which none of the scanned servers runs* | DCs of more than one version: add one DC of that version to `ExtraReferenceServers` and rebuild ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) |
+| Build warning *… is …, the same computer as …* | An `ExtraReferenceServers` entry is the reference DC (or another entry) under another name: remove it, or name the server you meant |
+| `STOP: … does not carry N entries of the merged scan` | AaronLocker did not build the rules from the merged scan. Nothing was deployed; the scans are in the build folder. Run the build again; if it repeats, compare `ScanResults\` with the rules |
+| STIG check `Not_Reviewed`: *no STIG item mapped for …* | The DC runs a Windows version this toolkit has no STIG item for. Record the AppLocker result from `Reason` under that version's deny-all, permit-by-exception item |
 | Many 8003 warnings for `.dll` files in *EXE and DLL* | MECM's managed installer audits DLLs (DLL rules are off in this baseline). Expected; `5_AL_review_events.ps1` counts and skips them; size the log up ([section 9](#9-mecm-configuration-manager)) |
 | `Application Identity` Stopped / Manual after the GPO applied | `gpupdate /force` once or twice, or reboot; `4_AL_validate.ps1`. A GPP *Services* item does **not** work for this protected service — the GPO uses System Services |
 | Effective policy empty after the first refresh | The service had just started: refresh again (`-Refresh` does it twice) |
@@ -575,7 +599,7 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 
 ## Appendix E — Design decisions and limits
 
-- **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class, down to its Windows Server version ([SERVER-2022.md](SERVER-2022.md)).
+- **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class, down to its Windows Server version. DCs of two versions in one class: `ExtraReferenceServers` merges a scan of each version into one policy — a union, so it only gets stricter ([SERVER-2022.md](SERVER-2022.md)).
 - **Two GPOs, one enabled link**, so Audit and Enforce never merge and switching is one command. Both GPOs carry the full rule set and the service setting.
 - **DLL rules off** — not required by WN25-00-000080; they add overhead and a high rule-maintenance burden. `EnableDllRules = $true` switches them on (`AuditOnly` / `Enabled` like the rest).
 - **No services enforcement in this baseline** — services are not evaluated (AppLocker's default) unless MECM's managed installer turns it on through its local policy; the baseline is safe either way on DCs (services run as SYSTEM or from the allowed folders).

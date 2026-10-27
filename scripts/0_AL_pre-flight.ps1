@@ -6,13 +6,17 @@
     Run from the management computer as a Domain Admin (or an account that can read GPOs and use WinRM on the servers). Nothing is
     changed. It checks:
       - the management computer: PowerShell edition, the GroupPolicy, ActiveDirectory and AppLocker modules
-      - the domain: PDC emulator, GPO read access, SYSVOL, the target OUs and the servers in them, the reference server
+      - the domain: PDC emulator, GPO read access, SYSVOL, the target OUs and the servers in them, the reference server and the
+        extra reference servers
       - the toolkit: AaronLocker, AccessChk (signature, 64-bit, pinned hash), the Customizations overlay, the KnownAdmins setting
       - the two GPOs: do they exist, which links are enabled
-      - on the reference server and every server in the target OUs, over WinRM: OS, language mode, execution policy, the AppLocker
-        module and the Application Identity service, any AppLocker policy already effective (local or GPO), the Configuration Manager
-        client or site server, SQL Server, Tenable Nessus, services and scheduled tasks that run code from outside the folders the
-        baseline allows, and whether every ExtraAllowedPaths entry (C:\Admin ...) can be changed by administrators only
+      - on the reference server, every extra reference server and every server in the target OUs, over WinRM: OS, language mode,
+        execution policy, the AppLocker module and the Application Identity service, any AppLocker policy already effective (local or
+        GPO), PowerShell 2.0 (it bypasses Constrained Language Mode), the Configuration Manager client or site server, SQL Server,
+        Tenable Nessus, services and scheduled tasks that run code from outside the folders the baseline allows, and whether every
+        ExtraAllowedPaths entry (C:\Admin ...) can be changed by administrators only
+      - the Windows Server versions: every server in scope should run the same version and installation type as the reference server
+        or one of the extra reference servers - the build only scans those for user-writable folders (SERVER-2022.md)
     A FAIL must be fixed before the build. A WARN says what the build will do about it (README, section 7, step 2).
 
 .PARAMETER SettingsFile
@@ -23,6 +27,9 @@
 
 .PARAMETER TargetOU
     Distinguished names of the OUs whose servers are in scope. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
+
+.PARAMETER ExtraReferenceServers
+    FQDNs of the servers whose scans the build merges in (another Windows Server version in scope). Overrides the setting.
 
 .INPUTS
     None. Nothing can be piped to this script.
@@ -39,22 +46,27 @@
     .\0_AL_pre-flight.ps1 -ReferenceServer dc01.contoso.com -TargetOU 'OU=Domain Controllers,DC=contoso,DC=com'
     The same, with the scope given on the command line.
 
+.EXAMPLE
+    .\0_AL_pre-flight.ps1 -ExtraReferenceServers dc22-01.contoso.com
+    Also checks a Server 2022 DC whose scan the build would merge in; every other server's version is compared with both.
+
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-26
-    Version  : 1.0
+    Date     : 2026-10-27
+    Version  : 1.1 (Windows Server version per server, PowerShell 2.0, ExtraReferenceServers)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules; WinRM to the servers.
     Changes  : nothing (read-only).
-    README   : section 7, step 2 (what each WARN and FAIL means and what to do).
+    README   : section 7, step 2 (what each WARN and FAIL means and what to do); SERVER-2022.md (mixed Windows Server versions).
 #>
 param(
     [string]$SettingsFile,
     [string]$ReferenceServer,
-    [string[]]$TargetOU
+    [string[]]$TargetOU,
+    [string[]]$ExtraReferenceServers
 )
 . "$PSScriptRoot\AL-Common.ps1"
-$Cfg = Initialize-AL -ScriptName '0_AL_pre-flight' -SettingsFile $SettingsFile -Overrides @{ ReferenceServer = $ReferenceServer; TargetOUs = $TargetOU }
+$Cfg = Initialize-AL -ScriptName '0_AL_pre-flight' -SettingsFile $SettingsFile -Overrides @{ ReferenceServer = $ReferenceServer; TargetOUs = $TargetOU; ExtraReferenceServers = $ExtraReferenceServers }
 $R = New-ALResults
 $Failed = 1
 
@@ -62,8 +74,18 @@ $Failed = 1
 $Probe = {
     param([string[]]$Extra)
     $o = [ordered]@{}
+    $ProgressPreference = 'SilentlyContinue'
     $os = Get-CimInstance Win32_OperatingSystem
-    $o.Os = "$($os.Caption) $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').InstallationType) $($os.Version)"
+    $o.InstallType = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').InstallationType)"
+    $o.Os = "$($os.Caption) $($o.InstallType) $($os.Version)"
+    $o.Build = [int]$os.BuildNumber
+    # PowerShell 2.0 (Windows Server feature PowerShell-V2): Installed / Available / Removed; empty where the feature does not exist
+    # (removed from Windows Server 2025) or Get-WindowsFeature cannot run (missing, or a client OS, where it throws)
+    $o.PsV2 = ''
+    try {
+        $f = Get-WindowsFeature -Name PowerShell-V2 -ErrorAction Stop
+        if ($f) { $o.PsV2 = "$($f.InstallState)" }
+    } catch { }
     $o.Language = "$($ExecutionContext.SessionState.LanguageMode)"
     $o.PsVersion = "$($PSVersionTable.PSVersion)"
     $o.ExecPolicy = "$(Get-ExecutionPolicy)"
@@ -136,6 +158,8 @@ try {
     if ($Targets.Count) { Add-ALResult $R 'OK' 'Servers in scope' "$($Targets.Count): $($Targets -join ', ')" } else { Add-ALResult $R 'WARN' 'Servers in scope' 'no enabled Windows Server computer accounts in the target OUs' }
     if ($Cfg.ReferenceServer) { Add-ALResult $R 'OK' 'Reference server' $Cfg.ReferenceServer }
     else { Add-ALResult $R 'WARN' 'Reference server' "not set - set ReferenceServer in the settings before 1_AL_build_policy.ps1 (a server in scope that looks like the others; for DCs any DC, e.g. the PDC emulator $($Domain.PDC))" }
+    $ExtraRefs = @($Cfg.ExtraReferenceServers | Where-Object { $_ -and $_ -ne $Cfg.ReferenceServer } | Sort-Object -Unique)
+    if ($ExtraRefs.Count) { Add-ALResult $R 'INFO' 'Extra reference servers' "$($ExtraRefs -join ', ') - the build scans them too and merges their scans (SERVER-2022.md, section 2)" }
 
     # ---- toolkit, overlay, KnownAdmins
     if (Test-Path -LiteralPath (Join-Path $Cfg.ToolkitPath 'Create-Policies.ps1')) { Add-ALResult $R 'OK' 'AaronLocker' $Cfg.ToolkitPath } else { Add-ALResult $R 'FAIL' 'AaronLocker' "not found at $($Cfg.ToolkitPath) - it ships in this repository; run 0_AL_get_toolkit.ps1" }
@@ -154,19 +178,28 @@ try {
         Add-ALResult $R 'INFO' "$($Pair[0]) GPO" "'$($Pair[1])' exists; links: $($States -join ', ')"
     }
 
-    # Reference server first, then every target server
+    # Reference server first, then the extra reference servers, then every target server
     $Seen = @{}
-    foreach ($C in @(@($Cfg.ReferenceServer) + $Targets | Where-Object { $_ })) {
+    $Versions = New-Object System.Collections.Generic.List[object]
+    foreach ($C in @(@($Cfg.ReferenceServer) + $ExtraRefs + $Targets | Where-Object { $_ })) {
         if ($Seen[$C.ToLower()]) { continue }; $Seen[$C.ToLower()] = $true
         $IsRef = ($C -eq $Cfg.ReferenceServer)
-        $Tag = if ($IsRef) { "$C (reference)" } else { $C }
+        $IsExtraRef = ($C -in $ExtraRefs)
+        $Tag = if ($IsRef) { "$C (reference)" } elseif ($IsExtraRef) { "$C (extra reference)" } else { $C }
         try { $P = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ArgumentList (, @($Cfg.ExtraAllowedPaths)) -ErrorAction Stop }
         catch { Add-ALResult $R 'FAIL' "WinRM $Tag" $_.Exception.Message; continue }
         Add-ALResult $R 'OK' "Server $Tag" "$($P.Os); PowerShell $($P.PsVersion)"
+        $Versions.Add([pscustomobject]@{ Server = $C; Tag = $Tag; IsRef = ($IsRef -or $IsExtraRef); Build = [int]$P.Build; InstallType = "$($P.InstallType)" })
+        # AaronLocker runs on the reference server and on every extra reference server
+        $BuildsHere = ($IsRef -or $IsExtraRef)
         if ($P.Language -eq 'FullLanguage') { Add-ALResult $R 'OK' "Language mode $Tag" 'FullLanguage (AaronLocker needs it)' } else { Add-ALResult $R 'FAIL' "Language mode $Tag" "$($P.Language) - AaronLocker needs FullLanguage" }
-        if ($P.ExecPolicy -in 'AllSigned', 'Restricted') { Add-ALResult $R $(if ($IsRef) { 'FAIL' } else { 'INFO' }) "Execution policy $Tag" "$($P.ExecPolicy) - AaronLocker's scripts are not signed and cannot run there$(if ($IsRef) { ' (the build runs them on this server)' })" }
+        if ($P.ExecPolicy -in 'AllSigned', 'Restricted') { Add-ALResult $R $(if ($BuildsHere) { 'FAIL' } else { 'INFO' }) "Execution policy $Tag" "$($P.ExecPolicy) - AaronLocker's scripts are not signed and cannot run there$(if ($BuildsHere) { ' (the build runs them on this server)' })" }
         if (-not $P.AppLockerModule) { Add-ALResult $R 'FAIL' "AppLocker module $Tag" 'missing' }
         Add-ALResult $R 'INFO' "Application Identity $Tag" $P.AppId
+        # PowerShell 2.0 predates Constrained Language Mode, which AppLocker's script rules rely on; this baseline's DLL rules (which
+        # would block the 2.0 engine) are off. Windows Server 2025 no longer has the feature.
+        if ($P.PsV2 -eq 'Installed') { Add-ALResult $R 'WARN' "PowerShell 2.0 $Tag" "installed - powershell.exe -Version 2 runs without Constrained Language Mode, around AppLocker's script rules (Windows Server 2022 STIG WN22-00-000410 / V-254278). Remove it: Uninstall-WindowsFeature PowerShell-V2 (SERVER-2022.md, section 3)" }
+        elseif ($P.PsV2) { Add-ALResult $R 'OK' "PowerShell 2.0 $Tag" "not installed (PowerShell-V2 $($P.PsV2))" }
         if ($P.LocalRules -gt 0) {
             if (@($P.LocalTypes | Where-Object { $_ -like 'ManagedInstaller=*' }).Count) { Add-ALResult $R 'INFO' "MECM managed installer $Tag" "local AppLocker policy ($($P.LocalTypes -join ', ')) merges with the GPO: expected. Its audit-only DLL rules and services enforcement stay; the GPO decides Exe/Msi/Script/Appx (README, MECM)" }
             else { Add-ALResult $R 'WARN' "Local AppLocker policy $Tag" "$($P.LocalRules) rule(s) in the LOCAL policy ($($P.LocalTypes -join ', ')) merge with the GPO policy - review Get-AppLockerPolicy -Local -Xml" }
@@ -202,6 +235,18 @@ try {
             if ($Ok.Count) { Add-ALResult $R 'OK' "Extra paths admin-only $Tag" ($Ok -join ', ') }
         }
     }
+
+    # Windows Server versions: the build scans only the reference server(s) for user-writable folders, so every server in scope should
+    # run the Windows build and installation type (Server Core / Server) of one of them
+    $RefVersions = @($Versions | Where-Object { $_.IsRef })
+    if ($RefVersions.Count) {
+        $RefKeys = @($RefVersions | ForEach-Object { "$($_.Build)|$($_.InstallType)" })
+        $RefText = (@($RefVersions | ForEach-Object { "$(Get-ALOsLabel $_.Build) $($_.InstallType)" } | Sort-Object -Unique) -join ', ')
+        $Odd = @($Versions | Where-Object { -not $_.IsRef -and "$($_.Build)|$($_.InstallType)" -notin $RefKeys })
+        foreach ($V in $Odd) { Add-ALResult $R 'WARN' "Version $($V.Server)" "$(Get-ALOsLabel $V.Build) $($V.InstallType), but the reference server(s) run $RefText. The build scans only those for user-writable folders, so folders that only this version makes user-writable would stay allowed here. Add a server like this one to ExtraReferenceServers (SERVER-2022.md, section 2)" }
+        if (-not $Odd.Count) { Add-ALResult $R 'OK' 'Versions' "every server checked runs the version of a reference server: $RefText" }
+    }
+    elseif ($Versions.Count) { Add-ALResult $R 'INFO' 'Versions' 'not compared - no reference server could be checked' }
 }
 catch { Add-ALResult $R 'FAIL' 'Script' $_.Exception.Message }
 finally {

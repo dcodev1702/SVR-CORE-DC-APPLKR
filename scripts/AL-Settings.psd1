@@ -16,6 +16,12 @@
     # any DC (the PDC emulator is a good choice). The rules depend on what is on its disk. (Build one policy per server class.)
     ReferenceServer   = 'DC25-1.skynet-home.local'
 
+    # Servers in scope that run ANOTHER Windows Server version than ReferenceServer (FQDNs), one per version - e.g. a Server 2022 DC next
+    # to Server 2025 DCs: @('dc22-01.contoso.com'). 1_AL_build_policy.ps1 scans each one too and merges every user-writable folder and
+    # every denied tool that any of them finds into the rules (stricter only, never wider). 0_AL_pre-flight.ps1 warns when a server in
+    # scope runs a version no reference server runs. Empty = every server runs the version of ReferenceServer (SERVER-2022.md).
+    ExtraReferenceServers = @()
+
     # Folders or files that every account may run from, outside C:\Windows and C:\Program Files* (admin tools in C:\Admin; programs a
     # non-admin account or a non-elevated session starts). Fixed local or UNC paths only; a folder ends in \*.
     # Typical MECM / SQL examples when they are installed on another drive (site systems - a separate settings file):
@@ -47,7 +53,7 @@
     # with another hash. When you replace AccessChk, verify the new file (README, "Updating AccessChk") and update this value.
     AccessChkSha256   = '843B6B1D275946F2C4569169C10C50EEC0968C4B2F0BED68C50E79F828FAB9F3'
 
-    # DLL rules are not needed for the STIG item (WN25-00-000080) and are switched off. $true keeps AaronLocker's DLL rules.
+    # DLL rules are not needed for the STIG item (WN25-00-000080 / WN22-00-000080) and are switched off. $true keeps AaronLocker's DLL rules.
     EnableDllRules    = $false
 
     # AppLocker logs allowed executions too; the 1 MB default wraps in minutes on a busy server. Sizes in MB (1-4096).

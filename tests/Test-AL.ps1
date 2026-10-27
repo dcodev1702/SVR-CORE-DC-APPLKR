@@ -115,6 +115,82 @@ try {
     Assert 'settings: empty GPO name refused' (Throws { Assert-ALSettings (With @{ AuditGpoName = '' }) 'x' })
     Assert 'settings: ReferenceServer FQDN accepted' (-not (Throws { Assert-ALSettings (With @{ ReferenceServer = 'dc01.contoso.com' }) 'x' } '*'))
     Assert 'settings: ReferenceServer with spaces/semicolons refused' (Throws { Assert-ALSettings (With @{ ReferenceServer = 'dc01; whoami' }) 'x' })
+    Assert 'settings: ExtraReferenceServers FQDNs accepted' (-not (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @('dc22-01.contoso.com', 'DC22-02') }) 'x' } '*'))
+    Assert 'settings: ExtraReferenceServers missing, $null or empty entries = not set' (-not (Throws { Assert-ALSettings (Get-BaseCfg) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = $null }) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = @('') }) 'x' } '*'))
+    foreach ($S in 'dc22; whoami', 'C:\x', '-dc22', 'dc22 .contoso.com') { Assert "settings: ExtraReferenceServers '$S' refused" (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @($S) }) 'x' }) }
+    Assert 'settings: the shipped settings file has ExtraReferenceServers (empty)' (@((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ExtraReferenceServers).Count -eq 0 -and (Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ContainsKey('ExtraReferenceServers'))
+
+    # ---- Windows Server versions and STIG items
+    Assert 'OS build: AD operatingSystemVersion' ((ConvertTo-ALOsBuild '10.0 (26100)') -eq 26100)
+    Assert 'OS build: Win32_OperatingSystem Version, with or without a revision' ((ConvertTo-ALOsBuild '10.0.20348') -eq 20348 -and (ConvertTo-ALOsBuild '10.0.20348.4294') -eq 20348)
+    Assert 'OS build: nothing usable is 0 (empty, text, an overflowing number)' ((ConvertTo-ALOsBuild '') -eq 0 -and (ConvertTo-ALOsBuild 'Windows') -eq 0 -and (ConvertTo-ALOsBuild '10.0 (99999999999)') -eq 0)
+    Assert 'OS label: 2025, 2022, 2019, 2016 named' ((Get-ALOsLabel 26100) -eq 'Windows Server 2025 (build 26100)' -and (Get-ALOsLabel 20348) -eq 'Windows Server 2022 (build 20348)' -and (Get-ALOsLabel 17763) -eq 'Windows Server 2019 (build 17763)' -and (Get-ALOsLabel 14393) -eq 'Windows Server 2016 (build 14393)')
+    Assert 'OS label: other builds and 0' ((Get-ALOsLabel 25398) -eq 'Windows build 25398' -and (Get-ALOsLabel 0) -eq 'unknown version')
+    $S25 = Get-ALStigItem 26100; $S22 = Get-ALStigItem 20348
+    Assert 'STIG item: Server 2025 = WN25-00-000080 / V-277992 CAT II' ($S25.StigId -eq 'WN25-00-000080' -and $S25.VulnId -eq 'V-277992' -and $S25.Severity -eq 'CAT II' -and $S25.Title -eq 'Windows Server 2025 must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.')
+    Assert 'STIG item: Server 2022 = WN22-00-000080 / V-254245 CAT II' ($S22.StigId -eq 'WN22-00-000080' -and $S22.VulnId -eq 'V-254245' -and $S22.Severity -eq 'CAT II' -and $S22.Title -eq 'Windows Server 2022 must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.')
+    Assert 'STIG item: no mapping for 2019, 23H2 or an unknown build' ($null -eq (Get-ALStigItem 17763) -and $null -eq (Get-ALStigItem 25398) -and $null -eq (Get-ALStigItem 0))
+    # Get-ALAdOsBuild with Get-ADComputer mocked (mock state in $Global:, see the harness rules)
+    function Get-ADComputer { [CmdletBinding()] param([string]$LDAPFilter, [string[]]$Properties, [string]$Server) $Global:ALTestFilter = $LDAPFilter; if ($Global:ALTestAd -eq 'throw') { throw 'AD down' }; $Global:ALTestAd }
+    $Dom = [pscustomobject]@{ PDC = 'pdc.contoso.com' }
+    $Global:ALTestAd = @([pscustomobject]@{ OperatingSystemVersion = '10.0 (20348)' })
+    Assert 'AD build: one account -> its build; filter by DNS name or computer name' ((Get-ALAdOsBuild 'dc22-01.contoso.com' $Dom) -eq 20348 -and $Global:ALTestFilter -eq '(|(dNSHostName=dc22-01.contoso.com)(sAMAccountName=dc22-01$))') $Global:ALTestFilter
+    [void](Get-ALAdOsBuild 'dc*(x)' $Dom)
+    Assert 'AD build: LDAP special characters escaped' ($Global:ALTestFilter -eq '(|(dNSHostName=dc\2a\28x\29)(sAMAccountName=dc\2a\28x\29$))') $Global:ALTestFilter
+    $Global:ALTestAd = @(); $None = Get-ALAdOsBuild 'x' $Dom
+    $Global:ALTestAd = @([pscustomobject]@{ OperatingSystemVersion = '10.0 (20348)' }, [pscustomobject]@{ OperatingSystemVersion = '10.0 (26100)' }); $Two = Get-ALAdOsBuild 'x' $Dom
+    $Global:ALTestAd = 'throw'; $Down = Get-ALAdOsBuild 'x' $Dom
+    Assert 'AD build: no account, two accounts or AD down -> 0' ($None -eq 0 -and $Two -eq 0 -and $Down -eq 0) "$None/$Two/$Down"
+    Remove-Item Function:\Get-ADComputer
+    Remove-Variable -Name ALTestAd, ALTestFilter -Scope Global
+
+    # ---- Merge-ALScanResults: AaronLocker-format scan folders (written the way AaronLocker writes them), union only
+    function New-Scan([string]$Name, [string[]]$Windir, [object[]]$Deny) {
+        $D = Join-Path $Tmp "scan-$Name"; New-Item -Path $D -ItemType Directory -Force | Out-Null
+        $Windir | Out-File -LiteralPath (Join-Path $D 'Writable_windir.txt') -Encoding ASCII
+        @() | Out-File -LiteralPath (Join-Path $D 'Writable_PF.txt') -Encoding ASCII
+        @() | Out-File -LiteralPath (Join-Path $D 'Writable_PF86.txt') -Encoding ASCII
+        $Deny | Select-Object PublisherName, ProductName, BinaryName | ConvertTo-Csv -NoTypeInformation | Out-File -LiteralPath (Join-Path $D 'ExeDenyListData.txt') -Encoding unicode
+        return [pscustomobject]@{ Server = $Name; Folder = $D }
+    }
+    $Ms = 'O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US'; $Os = 'MICROSOFT' + [char]0xAE + ' WINDOWS' + [char]0xAE + ' OPERATING SYSTEM'
+    $DenyA = @([pscustomobject]@{ PublisherName = $Ms; ProductName = $Os; BinaryName = 'CIPHER.EXE' }, [pscustomobject]@{ PublisherName = $Ms; ProductName = $Os; BinaryName = 'RUNAS.EXE' })
+    $ScanA = New-Scan 'A' @('C:\Windows\Tasks\*', 'C:\Windows\Temp\*', 'C:\Windows\Temp:*') $DenyA
+    $ScanSame = New-Scan 'Same' @('C:\Windows\Tasks\*', 'C:\Windows\Temp\*', 'C:\Windows\Temp:*') $DenyA
+    $M0 = Merge-ALScanResults @($ScanA, $ScanSame) (Join-Path $Tmp 'merged0')
+    Assert 'merge: identical scans add nothing' ($M0.Added.Count -eq 0 -and $M0.Writable.Count -eq 3 -and $M0.Deny.Count -eq 2) "added=$($M0.Added.Count)"
+    Assert 'merge: output byte-identical to AaronLocker''s own files when nothing is added' (((Get-FileHash -LiteralPath (Join-Path $Tmp 'merged0\Writable_windir.txt')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ScanA.Folder 'Writable_windir.txt')).Hash) -and ((Get-FileHash -LiteralPath (Join-Path $Tmp 'merged0\Writable_PF.txt')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ScanA.Folder 'Writable_PF.txt')).Hash) -and ((Get-FileHash -LiteralPath (Join-Path $Tmp 'merged0\ExeDenyListData.txt')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ScanA.Folder 'ExeDenyListData.txt')).Hash))
+    $DenyB = @([pscustomobject]@{ PublisherName = $Ms; ProductName = $Os.ToLower(); BinaryName = 'cipher.exe' }, [pscustomobject]@{ PublisherName = $Ms; ProductName = $Os; BinaryName = 'MSHTA.EXE' })
+    $ScanB = New-Scan 'dc22' @('c:\windows\tasks\*', 'C:\Windows\System32\spool\drivers\color\*', '', 'C:\Windows\Temp\*') $DenyB
+    $M1 = Merge-ALScanResults @($ScanA, $ScanB) (Join-Path $Tmp 'merged1')
+    $AddedText = @($M1.Added | ForEach-Object { "$($_.Server)|$($_.File)|$($_.Entry)" })
+    Assert 'merge: the second server adds only what is new (case-insensitive), blank lines ignored' ($AddedText.Count -eq 2 -and $AddedText -contains 'dc22|Writable_windir.txt|C:\Windows\System32\spool\drivers\color\*' -and $AddedText -contains "dc22|ExeDenyListData.txt|MSHTA.EXE ($Os)") ($AddedText -join '; ')
+    $W1 = [IO.File]::ReadAllLines((Join-Path $Tmp 'merged1\Writable_windir.txt'))
+    Assert 'merge: union in order, the first server''s spelling kept' (($W1 -join '|') -eq 'C:\Windows\Tasks\*|C:\Windows\Temp\*|C:\Windows\Temp:*|C:\Windows\System32\spool\drivers\color\*') ($W1 -join '|')
+    $DenyBytes = [IO.File]::ReadAllBytes((Join-Path $Tmp 'merged1\ExeDenyListData.txt'))
+    $DenyRead = @(Get-Content -LiteralPath (Join-Path $Tmp 'merged1\ExeDenyListData.txt') | ConvertFrom-Csv)
+    Assert 'merge: deny list is UTF-16 LE with BOM, reads back like AaronLocker reads it (3 tools, (R) intact)' ($DenyBytes[0] -eq 0xFF -and $DenyBytes[1] -eq 0xFE -and $DenyRead.Count -eq 3 -and (@($DenyRead | Where-Object { $_.ProductName -eq $Os }).Count -eq 3) -and (($DenyRead | ForEach-Object BinaryName) -join ',') -eq 'CIPHER.EXE,RUNAS.EXE,MSHTA.EXE') (($DenyRead | ForEach-Object BinaryName) -join ',')
+    Assert 'merge: the merged scan files are ASCII text with CRLF' ([IO.File]::ReadAllText((Join-Path $Tmp 'merged1\Writable_windir.txt')).EndsWith("color\*`r`n") -and [IO.File]::ReadAllBytes((Join-Path $Tmp 'merged1\Writable_PF.txt')).Length -eq 0)
+    $ScanEmpty = New-Scan 'empty' @() @()
+    $M2 = Merge-ALScanResults @($ScanA, $ScanEmpty) (Join-Path $Tmp 'merged2')
+    Assert 'merge: a server with an empty scan and an empty deny list adds nothing' ($M2.Added.Count -eq 0 -and $M2.Deny.Count -eq 2)
+    Remove-Item -LiteralPath (Join-Path $ScanEmpty.Folder 'Writable_PF86.txt')
+    Assert 'merge: a missing scan file stops' (Throws { Merge-ALScanResults @($ScanA, $ScanEmpty) (Join-Path $Tmp 'merged3') } 'STOP:*Writable_PF86.txt is missing*empty*')
+    Set-Content -LiteralPath (Join-Path $ScanB.Folder 'ExeDenyListData.txt') -Value 'Name,Path', 'x,y' -Encoding Unicode
+    Assert 'merge: a file that is not a deny list stops' (Throws { Merge-ALScanResults @($ScanA, $ScanB) (Join-Path $Tmp 'merged4') } 'STOP:*not an AaronLocker deny list*')
+
+    # ---- ConvertTo-ALAaronLockerPath / Get-ALMissingScanEntries
+    $Roots = [pscustomobject]@{ Windir = 'C:\Windows'; ProgramFiles = 'C:\Program Files'; ProgramFilesX86 = 'C:\Program Files (x86)' }
+    $Cases = [ordered]@{ 'C:\Windows\System32\Tasks\*' = '%SYSTEM32%\Tasks\*'; 'C:\Windows\SysWOW64\Tasks\*' = '%SYSTEM32%\Tasks\*'; 'c:\windows\Temp:*' = '%WINDIR%\Temp:*'; 'C:\Program Files (x86)\App\x\*' = '%PROGRAMFILES%\App\x\*'; 'C:\Program Files\App\*' = '%PROGRAMFILES%\App\*'; 'D:\Windows\Tasks\*' = 'D:\Windows\Tasks\*'; 'C:\WindowsApps\x\*' = 'C:\WindowsApps\x\*' }
+    $Bad = @(foreach ($K in $Cases.Keys) { $Got = ConvertTo-ALAaronLockerPath $K $Roots; if ($Got -ne $Cases[$K]) { "$K -> $Got" } })
+    Assert 'AaronLocker path: System32/SysWOW64/Windows/Program Files mapped like AaronLocker; other paths unchanged' ($Bad.Count -eq 0) ($Bad -join '; ')
+    Assert 'AaronLocker path: no Program Files (x86) on the server' ((ConvertTo-ALAaronLockerPath 'C:\Program Files\App\*' ([pscustomobject]@{ Windir = 'C:\Windows'; ProgramFiles = 'C:\Program Files'; ProgramFilesX86 = $null })) -eq '%PROGRAMFILES%\App\*')
+    $Pol2 = [xml]('<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="Enabled"><FilePathRule Id="1" Name="w" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions><Exceptions><FilePathCondition Path="%WINDIR%\tasks\*" /><FilePathCondition Path="%WINDIR%\temp\*" /><FilePathCondition Path="%WINDIR%\temp:*" /><FilePublisherCondition PublisherName="' + $Ms + '" ProductName="' + $Os + '" BinaryName="CIPHER.EXE"><BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition><FilePublisherCondition PublisherName="' + $Ms + '" ProductName="' + $Os + '" BinaryName="RUNAS.EXE"><BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition></Exceptions></FilePathRule></RuleCollection></AppLockerPolicy>')
+    Assert 'missing entries: a policy built from the scan carries all of it' (@(Get-ALMissingScanEntries $Pol2 $M0 $Roots).Count -eq 0) ((Get-ALMissingScanEntries $Pol2 $M0 $Roots) -join '; ')
+    $Miss = @(Get-ALMissingScanEntries $Pol2 $M1 $Roots)
+    Assert 'missing entries: the folder and the tool another server added are reported' ($Miss.Count -eq 2 -and @($Miss | Where-Object { $_ -like 'user-writable folder C:\Windows\System32\spool\drivers\color\* (expected exception %SYSTEM32%\spool\drivers\color\*)' }).Count -eq 1 -and @($Miss | Where-Object { $_ -like 'deny-list entry MSHTA.EXE*' }).Count -eq 1) ($Miss -join '; ')
+    $Pol3 = [xml]($Pol2.OuterXml -replace 'RuleCollection Type="Exe"', 'RuleCollection Type="Script"')
+    Assert 'missing entries: exceptions outside the EXE collection do not count' (@(Get-ALMissingScanEntries $Pol3 $M0 $Roots).Count -eq 5)
 
     # ---- Get-ALBuildFolder: works after the folder tree was moved (old latest.txt held a full path)
     $Out = Join-Path $Tmp 'Outputs\default'
@@ -271,6 +347,17 @@ try {
         $N = Add-ALPathExceptions $Copy @{ 'C:\Admin\*' = @('C:\Admin\Shared\*') }
         $After = New-Object System.Xml.XmlDocument; $After.Load($Copy)
         Assert 'exceptions: real build - C:\Admin rules in Exe + Script excepted, nothing else changed' ($N -ge 2 -and (Get-ALPolicySummary $After) -eq $Before -and ((Get-ALRuleExceptions $After 'C:\Admin\*') -join ',') -eq 'C:\Admin\Shared\*') "rules changed: $N"
+        # The merge self-check against a real AaronLocker build: its own scan, mapped like AaronLocker maps it, is entirely in its rules
+        $RealScan = Join-Path $BuildFolder 'ScanResults'
+        if (Test-Path -LiteralPath (Join-Path $RealScan 'Writable_windir.txt')) {
+            $RealMerge = Merge-ALScanResults @([pscustomobject]@{ Server = 'build'; Folder = $RealScan }) (Join-Path $Tmp 'real-merge')
+            $RealPol = New-Object System.Xml.XmlDocument; $RealPol.Load((Get-ChildItem -LiteralPath $BuildFolder -Filter 'AppLockerRules-*-Enforce.xml' | Select-Object -First 1).FullName)
+            $RealMiss = @(Get-ALMissingScanEntries $RealPol $RealMerge $Roots)
+            Assert "merge self-check: real build - all $(@($RealMerge.Writable).Count) excluded folders and $(@($RealMerge.Deny).Count) denied tools found in its rules" ($RealMiss.Count -eq 0 -and @($RealMerge.Writable).Count -gt 0 -and @($RealMerge.Deny).Count -gt 0) ($RealMiss -join '; ')
+            $Fake = [pscustomobject]@{ Writable = @($RealMerge.Writable) + 'C:\Windows\NotInThisBuild\*'; Deny = $RealMerge.Deny }
+            Assert 'merge self-check: real build - a folder the rules do not carry is reported' (@(Get-ALMissingScanEntries $RealPol $Fake $Roots).Count -eq 1)
+            Assert 'merge: real scan merged alone is byte-identical (writable lists and deny list)' (@('Writable_windir.txt', 'Writable_PF.txt', 'Writable_PF86.txt', 'ExeDenyListData.txt' | Where-Object { (Get-FileHash -LiteralPath (Join-Path $RealScan $_)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $Tmp "real-merge\$_")).Hash }).Count -eq 0)
+        }
     }
 }
 finally {
