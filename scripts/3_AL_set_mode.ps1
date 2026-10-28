@@ -109,7 +109,7 @@ try {
             'Enforce' { @('Programs, scripts and installers that the rules do not allow are BLOCKED for non-admin users and for every non-elevated session.',
                     'Run 5_AL_review_events.ps1 first and be sure the Audit period showed no events you still need (MECM, Nessus, backup, monitoring agents, C:\Admin tools).',
                     "Roll back with: 3_AL_set_mode.ps1 -Mode Audit -Refresh$(if ($SettingsFile) { " -SettingsFile '$SettingsFile'" })") }
-            'Off' { @('AppLocker rules are removed from the servers at the next refresh. The STIG item WN25-00-000080 is a finding again.') }
+            'Off' { @("AppLocker rules are removed from the servers at the next refresh, and $(Get-ALStigLabel @(foreach ($C in @($Targets | Where-Object { $_ })) { Get-ALAdOsBuild $C $Domain })) is a finding again.") }
         }
         $Changes = @($Steps | ForEach-Object { "  link '$($_.Name)' on $($_.Ou): $(if ($_.New) { 'create, ' })$(if ($_.Want) { 'ENABLE' } else { 'disable' })" })
         if (-not $WhatIfPreference) {

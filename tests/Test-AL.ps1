@@ -133,7 +133,7 @@ try {
     Assert 'settings: ExtraReferenceServers FQDNs accepted' (-not (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @('dc22-01.contoso.com', 'DC22-02') }) 'x' } '*'))
     Assert 'settings: ExtraReferenceServers missing, $null or empty entries = not set' (-not (Throws { Assert-ALSettings (Get-BaseCfg) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = $null }) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = @('') }) 'x' } '*'))
     foreach ($S in 'dc22; whoami', 'C:\x', '-dc22', 'dc22 .contoso.com') { Assert "settings: ExtraReferenceServers '$S' refused" (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @($S) }) 'x' }) }
-    Assert 'settings: the shipped settings file has EnableAppxRules = $true' ((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).EnableAppxRules -eq $true)
+    Assert 'settings: the shipped settings file has EnableAppxRules = $false' ((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).EnableAppxRules -eq $false)
     Assert 'settings: the shipped settings file has ExtraReferenceServers (empty)' (@((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ExtraReferenceServers).Count -eq 0 -and (Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ContainsKey('ExtraReferenceServers'))
 
     # ---- Windows Server versions and STIG items
@@ -146,6 +146,7 @@ try {
     Assert 'STIG item: Server 2025 = WN25-00-000080 / V-277992 CAT II' ($S25.StigId -eq 'WN25-00-000080' -and $S25.VulnId -eq 'V-277992' -and $S25.Severity -eq 'CAT II' -and $S25.Title -eq 'Windows Server 2025 must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.')
     Assert 'STIG item: Server 2022 = WN22-00-000080 / V-254245 CAT II' ($S22.StigId -eq 'WN22-00-000080' -and $S22.VulnId -eq 'V-254245' -and $S22.Severity -eq 'CAT II' -and $S22.Title -eq 'Windows Server 2022 must employ a deny-all, permit-by-exception policy to allow the execution of authorized software programs.')
     Assert 'STIG item: no mapping for 2019, 23H2 or an unknown build' ($null -eq (Get-ALStigItem 17763) -and $null -eq (Get-ALStigItem 25398) -and $null -eq (Get-ALStigItem 0))
+    Assert 'STIG label: 2022 servers named WN22, 2025 WN25, both one per version, no mapping or no server generic' ((Get-ALStigLabel @(20348, 20348)) -eq 'WN22-00-000080 / V-254245' -and (Get-ALStigLabel @(26100)) -eq 'WN25-00-000080 / V-277992' -and (Get-ALStigLabel @(26100, 20348, 0)) -eq 'WN22-00-000080 / V-254245, WN25-00-000080 / V-277992' -and (Get-ALStigLabel @(17763, 0)) -eq 'the STIG item' -and (Get-ALStigLabel @()) -eq 'the STIG item')
     # Get-ALAdOsBuild with Get-ADComputer mocked (mock state in $Global:, see the harness rules)
     function Get-ADComputer { [CmdletBinding()] param([string]$LDAPFilter, [string[]]$Properties, [string]$Server) $Global:ALTestFilter = $LDAPFilter; if ($Global:ALTestAd -eq 'throw') { throw 'AD down' }; $Global:ALTestAd }
     $Dom = [pscustomobject]@{ PDC = 'pdc.contoso.com' }
@@ -613,6 +614,8 @@ USER SETTINGS
         Assert 'policy check: on Windows the sizes are exact for every form the parser accepts' ($Chk.Native -and ($ExeCol.Exact -or -not ($Sup.Fqbn -and $Sup.Hash))) "exact=$($ExeCol.Exact) support=$($Sup | ConvertTo-Json -Compress)"
         $Live = & $ALPolicyStoreProbe
         Assert 'store probe: this computer - build, the AppLocker folder with its SDDL and the converter task are read' ($Live.Build -gt 0 -and @($Live.Store | Where-Object { $_.Kind -eq 'Folder' -and $_.Exists -and $_.Sddl }).Count -eq 1 -and ($Live.Task -or $Live.TaskError)) "$($Live.Build).$($Live.Ubr) task=$($Live.Task.Principal) $($Live.TaskError)"
+        $LiveKeys = @($Live.Store | Where-Object { $_.Kind -eq 'RegistryKey' -and $_.Exists })
+        Assert 'store probe: this computer - the permissions of every existing Srp / SrpV2 key are read (Get-Acl on registry paths in 5.1)' (@($LiveKeys | Where-Object { $_.Error -or -not $_.Sddl }).Count -eq 0) "$(@($LiveKeys).Count) key(s); $(@($LiveKeys | Where-Object { $_.Error } | ForEach-Object { $_.Error }) -join ' | ')"
     }
 
     if ($BuildFolder) {
