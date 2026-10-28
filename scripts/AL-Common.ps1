@@ -8,7 +8,8 @@
         values that would widen the policy or damage a system folder), Set-ALSettingsArray (writes one array setting back in place)
       - the confirmation gate: Confirm-ALChange (yellow Y/N, -NoConfirm, never hangs in a non-interactive session), Test-ALInteractive
       - results and evidence: New-ALResults, Add-ALResult, Write-ALResults (table + CSV + PASSED / FAILED line), Stop-ALTranscript
-      - the domain and GPOs: Get-ALDomainInfo, Resolve-ALTargetOUs, Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
+      - the domain and GPOs: Get-ALDomainInfo, Get-ALPdcEmulator and Resolve-ALReferenceServer (ReferenceServer = PDC), Resolve-ALTargetOUs,
+        Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
         ConvertFrom-ALGpLink, Get-ALGpoLinkTargets, Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
       - the servers and this computer: Get-ALLocalNames, Test-ALLocalComputer, Invoke-ALOn (a script block over WinRM, or in this
         process when the server is the computer the script runs on - the toolkit run on a DC itself)
@@ -47,8 +48,8 @@
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
     Date     : 2026-10-28
-    Version  : 1.3 (policy conversion check against the 64 KB ACL limit, the policy store probe; 1.2: gpupdate / gpresult helpers,
-               EnableAppxRules, scripts run on a server itself without WinRM to itself)
+    Version  : 1.4 (ReferenceServer = PDC, resolved at run time; 1.3: policy conversion check against the 64 KB ACL limit, the policy
+               store probe; 1.2: gpupdate / gpresult helpers, EnableAppxRules, scripts run on a server itself without WinRM to itself)
     Requires : Windows PowerShell 5.1 or PowerShell 7. ASCII-only source. Modules are loaded on demand by Import-ALModule.
     Changes  : nothing by itself; the step scripts decide what is changed.
 #>
@@ -146,7 +147,7 @@ function Assert-ALSettings($Cfg, [string]$SettingsFile) {
         if ("$K" -notmatch '^(S-1-\d+(-\d+)+|[^\\/:*?"<>|]+\\[^\\/:*?"<>|]+)$') { throw "STOP: KnownAdmins entry '$K' must be a SID (S-1-5-21-...) or DOMAIN\Group." }
         if (Test-ALNeverAdmin "$K") { throw "STOP: KnownAdmins entry '$K' is not an administrators group. Listing it would make every folder its members can write count as administrators-only and WIDEN the policy - remove it." }
     }
-    foreach ($C in @($Cfg.CollapseExceptionsUnder)) {
+    foreach ($C in @($Cfg.CollapseExceptionsUnder | Where-Object { $_ })) {
         if ("$C" -notmatch '^(%WINDIR%|%SYSTEM32%|%PROGRAMFILES%|%OSDRIVE%|[A-Za-z]:)\\[^\\*?"<>|][^*?"<>|]*\\\*$') { throw "STOP: CollapseExceptionsUnder entry '$C' must be a folder under %WINDIR%, %SYSTEM32%, %PROGRAMFILES%, %OSDRIVE% or a drive letter, ending in \* (for example %WINDIR%\SYSVOL\*)." }
         if ("$C" -match '^%WINDIR%\\(SYSTEM32|SYSWOW64|WINSXS|MICROSOFT\.NET|SERVICING)\\\*$') { throw "STOP: CollapseExceptionsUnder entry '$C' would exclude a core Windows folder for every non-admin and non-elevated session - remove it." }
     }
@@ -302,6 +303,30 @@ function Get-ALDomainInfo {
     Import-ALModule ActiveDirectory
     $D = Get-ADDomain -ErrorAction Stop
     [pscustomobject]@{ DnsRoot = $D.DNSRoot; DN = $D.DistinguishedName; PDC = $D.PDCEmulator; NetBIOS = $D.NetBIOSName; DcOU = $D.DomainControllersContainer }
+}
+
+# The FQDN of the PDC emulator of the domain this computer belongs to: from .NET (no module needed), with Get-ADDomain as the
+# fallback. A STOP when neither can tell (not domain-joined, no RSAT) - the setting then needs an FQDN.
+function Get-ALPdcEmulator {
+    $Why = ''
+    try { $Pdc = "$([System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain().PdcRoleOwner.Name)".Trim(); if ($Pdc) { return $Pdc } }
+    catch { $Why = $_.Exception.Message }
+    try { $Pdc = "$((Get-ALDomainInfo).PDC)".Trim(); if ($Pdc) { return $Pdc } }
+    catch { if (-not $Why) { $Why = $_.Exception.Message } }
+    throw "STOP: the PDC emulator of this computer's domain could not be found$(if ($Why) { " ($Why)" }). Run on a domain-joined computer, or set ReferenceServer to the FQDN of a DC."
+}
+
+# The reference server as an FQDN. ReferenceServer = 'PDC' (the shipped default) means the PDC emulator of the domain this computer
+# belongs to, found at run time - one settings file serves every domain and enclave; anything else is used as given. The resolved
+# name replaces the keyword in $Cfg (ReferenceServerResolved is set), so a script resolves once and every later use sees the FQDN.
+function Resolve-ALReferenceServer($Cfg) {
+    $S = "$($Cfg.ReferenceServer)".Trim()
+    if ($S -notmatch '^PDC$') { return $S }
+    $Pdc = Get-ALPdcEmulator
+    $Cfg.ReferenceServer = $Pdc
+    $Cfg.ReferenceServerResolved = $true
+    Write-Host "ReferenceServer = PDC: the PDC emulator of this domain is $Pdc"
+    return $Pdc
 }
 
 # Target OUs from the settings (default: Domain Controllers); each must exist

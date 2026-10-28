@@ -32,7 +32,7 @@
     Settings file to use. Default: AL-Settings.psd1 next to the script.
 
 .PARAMETER ComputerName
-    FQDN of the server to build on. Default: the ReferenceServer setting (required: one of the servers in scope that looks like the
+    FQDN of the server to build on, or PDC (the PDC emulator of this domain, found at run time). Default: the ReferenceServer setting (required: one of the servers in scope that looks like the
     others; for domain controllers any DC, the PDC emulator is a good choice).
 
 .PARAMETER ExtraAllowedPaths
@@ -196,7 +196,8 @@ function Close-ALBuildServer($Server) {
 }
 
 try {
-    if (-not $ComputerName) { throw 'STOP: no reference server. Set ReferenceServer in the settings (a server in scope that looks like the others; for DCs any DC) or pass -ComputerName. Nothing was changed.' }
+    if (-not $ComputerName) { throw 'STOP: no reference server. Set ReferenceServer in the settings (PDC, or a server in scope that looks like the others; for DCs any DC) or pass -ComputerName. Nothing was changed.' }
+    $ComputerName = Resolve-ALReferenceServer $Cfg
     $Extra = @($Cfg.ExtraAllowedPaths | Where-Object { $_ })
     $Known = @($Cfg.KnownAdmins | Where-Object { $_ })
     # Only an exact repeat of a name is dropped: a short name and an FQDN may still be two different servers

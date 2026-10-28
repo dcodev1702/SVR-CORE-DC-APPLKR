@@ -93,6 +93,7 @@ try {
     $Domain = Get-ALDomainInfo
     $Ous = Resolve-ALTargetOUs $Cfg $Domain
     $Targets = Get-ALTargetComputers $Ous $Domain
+    $RefServer = Resolve-ALReferenceServer $Cfg   # PDC -> the PDC emulator; only its event log sizes are set here
 
     # Plan (read-only apart from the *-Deploy.xml files written into the build folder)
     $Build = Get-ALBuildFolder $Cfg $OutputFolder
@@ -189,7 +190,7 @@ try {
 
     # ---- AppLocker event log sizes on the servers in scope (the 1 MB default wraps in minutes)
     if (-not $SkipLogSize) {
-        $Servers = @(@($Cfg.ReferenceServer) + $Targets | Where-Object { $_ } | Sort-Object -Unique)
+        $Servers = @(@($RefServer) + $Targets | Where-Object { $_ } | Sort-Object -Unique)
         if ($Servers.Count -and $PSCmdlet.ShouldProcess("$($Servers.Count) server(s)", 'set the AppLocker event log sizes')) {
             Write-Host "AppLocker event log sizes on: $($Servers -join ', ')"
             Set-ALEventLogSize $Servers $Cfg.EventLogSizesMB | ForEach-Object { Write-Host "  $_" }

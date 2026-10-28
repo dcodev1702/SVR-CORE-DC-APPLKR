@@ -92,7 +92,7 @@ Copied the repository to the DC another way (an SMB share, removable media, unpa
 Get-ChildItem -LiteralPath C:\SVR-CORE-DC-APPLKR -Recurse -File | Unblock-File
 ```
 
-**Your settings.** Edit `AL-Settings.psd1` on the PAW (`ReferenceServer` = a DC in scope, for example this one) and copy it over the DC's copy:
+**Your settings.** Edit `AL-Settings.psd1` on the PAW (`ReferenceServer` = `PDC`, or the FQDN of a DC in scope, for example this one) and copy it over the DC's copy:
 
 ```powershell
 $S = New-PSSession -ComputerName $Dc
@@ -169,14 +169,14 @@ The deny list works the same way. The policy denies the bypass tools (`cipher`, 
 
 ### All your DCs run Server 2022
 
-Set `ReferenceServer` in `scripts\AL-Settings.psd1` to one of your 2022 DCs (the PDC emulator is a good choice) and follow the README as written. Pre-flight must show `Versions: every server checked runs the version of a reference server`. The lab verification ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)) ran on Server 2025, so on Server 2022 your Audit period is the proof. Don't shorten it.
+Leave `ReferenceServer` at `PDC` in `scripts\AL-Settings.psd1` (the PDC emulator, a 2022 DC here), or set it to one of your 2022 DCs, and follow the README as written. Pre-flight must show `Versions: every server checked runs the version of a reference server`. The lab verification ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)) ran on Server 2025, so on Server 2022 your Audit period is the proof. Don't shorten it.
 
 ### DCs of both versions
 
 All DCs sit in the Domain Controllers OU and get the same GPO, so one policy has to fit both versions. Keep your usual `ReferenceServer` and add **one DC of the other version** to `ExtraReferenceServers` in `scripts\AL-Settings.psd1`:
 
 ```powershell
-    ReferenceServer   = 'dc25-01.contoso.com'                # a Server 2025 DC: the rules are generated here
+    ReferenceServer   = 'PDC'                                # the PDC emulator (a Server 2025 DC here): the rules are generated on it
     ExtraReferenceServers = @('dc22-01.contoso.com')         # a Server 2022 DC: scanned too
 ```
 
@@ -476,7 +476,7 @@ Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps
 
 - [ ] Where the toolkit runs: a PAW in the DCs' domain, or a DC with the repository copied to an administrators-only folder outside `C:\AaronLocker`, its `Logs` and `Outputs` copied back to the PAW ([Before you start](#before-you-start-where-to-run-the-toolkit)).
 - [ ] DCs and their versions listed ([section 1](#1-which-case-are-you-in)).
-- [ ] Only 2022 DCs: `ReferenceServer` is a 2022 DC ([section 2](#all-your-dcs-run-server-2022)).
+- [ ] Only 2022 DCs: `ReferenceServer` is `PDC` (a 2022 DC holds the role) or the FQDN of a 2022 DC ([section 2](#all-your-dcs-run-server-2022)).
 - [ ] 2022 and 2025 DCs: one DC of the other version is in `ExtraReferenceServers`, and pre-flight shows `Versions` OK ([section 2](#dcs-of-both-versions)).
 - [ ] Pre-flight shows no `PowerShell 2.0 … installed` warning ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
 - [ ] 2022 results recorded: **WN22-00-000080 / V-254245** from `6_AL_stig_check.ps1`, **WN22-00-000410 / V-254278** from pre-flight or section 3 ([section 4](#4-the-server-2022-stig-ids)).

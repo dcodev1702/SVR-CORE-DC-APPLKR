@@ -23,7 +23,7 @@
     Settings file to use. Default: AL-Settings.psd1 next to the script.
 
 .PARAMETER ReferenceServer
-    FQDN of the server the baseline will be built on. Overrides the ReferenceServer setting for this run.
+    FQDN of the server the baseline will be built on, or PDC (the PDC emulator of this domain). Overrides the setting for this run.
 
 .PARAMETER TargetOU
     Distinguished names of the OUs whose servers are in scope. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
@@ -156,7 +156,11 @@ try {
     $Targets = Get-ALTargetComputers $Ous $Domain
     foreach ($Ou in $Ous) { Add-ALResult $R 'OK' 'Target OU' $Ou }
     if ($Targets.Count) { Add-ALResult $R 'OK' 'Servers in scope' "$($Targets.Count): $($Targets -join ', ')" } else { Add-ALResult $R 'WARN' 'Servers in scope' 'no enabled Windows Server computer accounts in the target OUs' }
-    if ($Cfg.ReferenceServer) { Add-ALResult $R 'OK' 'Reference server' $Cfg.ReferenceServer }
+    # ReferenceServer = PDC: the PDC emulator of this domain, found now; a lookup that fails is a FAIL and the server is left out below
+    try { [void](Resolve-ALReferenceServer $Cfg) } catch { Add-ALResult $R 'FAIL' 'Reference server' "ReferenceServer = PDC, but $($_.Exception.Message)"; $Cfg.ReferenceServer = '' }
+    if ($Cfg.ReferenceServerResolved) { Add-ALResult $R 'OK' 'Reference server' "$($Cfg.ReferenceServer) (the PDC emulator of this domain; ReferenceServer = PDC)" }
+    elseif ($Cfg.ReferenceServer) { Add-ALResult $R 'OK' 'Reference server' $Cfg.ReferenceServer }
+    elseif (@($R | Where-Object { $_.Check -eq 'Reference server' }).Count) { }
     else { Add-ALResult $R 'WARN' 'Reference server' "not set - set ReferenceServer in the settings before 1_AL_build_policy.ps1 (a server in scope that looks like the others; for DCs any DC, e.g. the PDC emulator $($Domain.PDC))" }
     $ExtraRefs = @($Cfg.ExtraReferenceServers | Where-Object { $_ -and $_ -ne $Cfg.ReferenceServer } | Sort-Object -Unique)
     if ($ExtraRefs.Count) { Add-ALResult $R 'INFO' 'Extra reference servers' "$($ExtraRefs -join ', ') - the build scans them too and merges their scans (SERVER-2022.md, section 2)" }

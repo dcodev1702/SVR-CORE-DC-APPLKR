@@ -240,7 +240,7 @@ try {
     Import-ALModule GroupPolicy; Import-ALModule ActiveDirectory; Import-ALModule AppLocker
     $Domain = Get-ALDomainInfo
     $Ous = Resolve-ALTargetOUs $Cfg $Domain
-    if (-not $ComputerName) { $ComputerName = @(@($Cfg.ReferenceServer) + @(Get-ALTargetComputers $Ous $Domain) | Where-Object { $_ } | Sort-Object -Unique) }
+    if (-not $ComputerName) { $ComputerName = @(@(Resolve-ALReferenceServer $Cfg) + @(Get-ALTargetComputers $Ous $Domain) | Where-Object { $_ } | Sort-Object -Unique) }
     $Folders = @($Cfg.SecureFolders | Where-Object { $_ })
 
     # ---- survey (read-only): the GPOs, every link, their rule IDs; then each server
