@@ -78,13 +78,13 @@ Both GPOs also set **System Services → Application Identity = Automatic** (`Gp
 ```
 SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer, e.g. C:\SVR-CORE-DC-APPLKR
   README.md  SERVER-2022.md  THIRD-PARTY-NOTICES.md
-  scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_AL_stig_check.ps1
+  scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_...  7_AL_diagnose.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
                    GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
-  tests\           Test-AL.ps1 (150 unit tests, no network, both PowerShell editions; 153 with -BuildFolder)
+  tests\           Test-AL.ps1 (230 unit tests, no network, both PowerShell editions; 236 with -BuildFolder)
   images\          architecture diagram (spec, SVG, PNG)
   Outputs\<profile>\<timestamp>\        created by the scripts: rules, scan results, hashes, deploy records, GPO backups
   Logs\                                 created by the scripts: one transcript (+ CSV of results) per run
@@ -100,7 +100,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
 
 | Item | Detail |
 |---|---|
-| **Management computer** | Windows 10/11 or Windows Server, **Windows PowerShell 5.1 or PowerShell 7**, RSAT **Group Policy Management** and **Active Directory** modules, and the built-in `AppLocker` module. |
+| **Management computer** | Windows 10/11 or Windows Server, **Windows PowerShell 5.1 or PowerShell 7**, RSAT **Group Policy Management** and **Active Directory** modules, and the built-in `AppLocker` module. It must be a member of the DCs' domain (or forest). **Or one of the DCs itself:** every DC already has both modules, and each script runs its per-server steps in-process when the server is the computer it runs on (a remote session cannot open a second WinRM hop to its own computer; the scripts never try). Copy the repository to the DC, e.g. `C:\SVR-CORE-DC-APPLKR`, outside `C:\AaronLocker`. |
 | **RSAT without Internet** | Windows Server: `Install-WindowsFeature GPMC, RSAT-AD-PowerShell` (the payload is on the server). Windows 11: `Add-WindowsCapability -Online -Name Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0 -Source <Features on Demand media> -LimitAccess` (same for `Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0`), or deploy the capability with MECM/WSUS. |
 | **Account** | Domain Admin (or: create/link GPOs, write SYSVOL, WinRM administrator on the DCs). |
 | **WinRM** | Enabled on every DC (default on Windows Server 2022 and 2025). Test: `Invoke-Command -ComputerName <dc> { $env:COMPUTERNAME }`. |
@@ -129,7 +129,7 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
    Expected: `AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit), SHA-256 843B6B1D...F9F3 (pinned)` and `Toolkit ready`.
 
 > [!TIP]
-> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 182 passed`.
+> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 230 passed`.
 
 ---
 
@@ -141,13 +141,14 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 |---|---|---|
 | `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JSLC_AppLocker_AUDIT_Domain_Controller` / `JSLC_AppLocker_ENFORCE_Domain_Controller` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
-| `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC25-1.skynet-home.local` (the lab DC) |
+| `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC22-2.holonet.local` (the lab's Server Core 2022 DC; the Server Core 2025 lab DC is `DC25-1.skynet-home.local`) |
 | `ExtraReferenceServers` | DCs of **another Windows Server version** in scope, one per version (e.g. a Server 2022 DC next to 2025 DCs). The build scans them too and merges every user-writable folder and denied tool they find: stricter only ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) | empty |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
 | `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
 | `EnableDllRules` | `$false` = DLL collection off | `$false` |
+| `EnableAppxRules` | `$false` = Appx (packaged app) collection off: emptied and `NotConfigured` in both GPOs, like the DLL collection. The test to make when a Server Core DC logs AppLocker event 8000 ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)) | `$true` |
 | `EventLogSizesMB` | AppLocker log sizes on the servers | 100 MB for each of the four logs |
 
 **Several server classes** (DCs, MECM site systems, other servers)? Copy the file (`AL-Settings.mecm.psd1`), change it, and pass **`-SettingsFile`** to every script. Each file keeps its own `Outputs\<profile>` folder and its own GPO pair.
@@ -172,11 +173,12 @@ Every script carries comment-based help: `Get-Help .\<script>.ps1 -Full` shows i
 | 3 | `0_AL_secure_folders.ps1` | Creates a missing `C:\Admin` administrators-only; reports a writable one | DCs (only a **missing** folder; an existing one only with `-Fix`) |
 | 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC (merging the scans of any `ExtraReferenceServers`), checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back | temporary folder on the reference DC (and each extra reference DC) |
 | 5 | `2_AL_create_gpos.ps1` | Backs up, creates/updates the Audit + Enforce GPOs, reads the rules back, links new GPOs **disabled**, sizes the logs | domain (GPOs), DCs (log size) |
-| 6 | `3_AL_set_mode.ps1 -Mode Audit -Refresh` | Enables the Audit link, refreshes the DCs | domain (links) |
-| 6 | `4_AL_validate.ps1` | GPOs, links, rules, service, effective policy, decisions, DC services, `C:\Admin`, events | read-only |
+| 6 | `3_AL_set_mode.ps1 -Mode Audit -Refresh` | Enables the Audit link, then on every DC: `gpupdate /force` twice with its output kept, `gpresult` (which GPOs applied, the Registry and Security extensions), Application Identity, the effective policy and the newest policy event, judged against the mode (table + CSV + raw files) | domain (links) |
+| 6 | `4_AL_validate.ps1` | GPOs, links, rules, service, effective policy, **gpresult per DC** (the expected GPO applied, the other not, extensions without error, newest policy event 8001), decisions, DC services, `C:\Admin`, events | read-only |
 | 7 | `5_AL_review_events.ps1` | Summarises would-be-blocked events (tags MECM / NESSUS / ADMIN / SYSVOL), CSV | read-only |
 | 8 | `3_AL_set_mode.ps1 -Mode Enforce -Refresh` | Disables Audit, enables Enforce, refreshes | domain (links) |
 | 9 | `6_AL_stig_check.ps1` | Per DC, the STIG item for its version (WN25-00-000080 / V-277992 or WN22-00-000080 / V-254245): status + values + evidence XML | read-only |
+| - | `7_AL_diagnose.ps1` | When a DC does not apply the policy (AppLocker event **8000**): the status decoded, service and driver, the AppLocker and packaged-app components, delivered vs effective policy, gpresult, Group Policy / AppID / service events; evidence files per DC. `-Local` runs it on the DC's own console | read-only |
 
 Every script that changes something shows the change in **yellow** and asks `Continue? [Y/N]`; **`-NoConfirm`** skips the prompt for automation, a non-interactive session without `-NoConfirm` stops before changing anything, and **`-WhatIf`** shows the plan without changing anything. Every run writes a transcript to `Logs\`; the read-only checks also write their results table as CSV and exit with code 1 on a failure.
 
@@ -265,9 +267,20 @@ It turns each build file into `…-Deploy.xml` (Audit: every collection `AuditOn
 .\3_AL_set_mode.ps1 -Mode Audit -Refresh
 .\4_AL_validate.ps1
 ```
-`-Refresh` runs `gpupdate` twice on each DC (the first refresh starts Application Identity, the second loads the rules). Without it, DCs apply the change at their next refresh (every **5 minutes**) or at boot.
+`-Refresh` runs `gpupdate /target:computer /force` twice on each DC (the first refresh starts Application Identity, the second loads the rules) and keeps the output of both passes. It then runs `gpresult /scope computer` on each DC and judges the result against the mode just set, in a table that is also saved as CSV:
 
-Validation must end with **`Validation: PASSED`**: both GPOs with AD = SYSVOL version, one active link, Application Identity `Running / Auto`, effective policy `Exe/Msi/Script/Appx = AuditOnly`, DC services running, nothing in `C:\Admin` that a non-admin can change is still allowed. The DLL and `ManagedInstaller` collections that MECM's managed installer adds are reported (INFO), not judged.
+| Row | OK means |
+|---|---|
+| `gpupdate <DC>` | both passes ended with exit code 0 (*Computer Policy update has completed successfully*) |
+| `GPO applied <DC>` | the Audit GPO is applied and the Enforce GPO is not (for Enforce the other way round; for Off neither). Every other GPO is listed too, with the reason gpresult gives for one that is not applied (`Disabled (Link)`, `Denied (Security)`, ...) |
+| `GPO processing <DC>` | the Registry extension (it writes the AppLocker rules) and the Security extension (the Application Identity service setting) ran without error |
+| `AppLocker policy events <DC>` | the newest policy event is **8001** (applied). A newest **8000** (*AppID policy conversion failed*) is a WARN with the status decoded: the rules are not loaded on that DC ([Appendix D](#appendix-d--troubleshooting)). Windows Server 2022 logs the 8001 a minute or two after the refresh; when the policy is already effective the row says so (INFO) |
+| `AppIDSvc <DC>` / `Effective policy <DC>` | Application Identity `Running/Auto`; the effective policy in the mode just set |
+| `Group Policy <DC>` | when and from which DC Group Policy was last applied, and where the raw output is |
+
+The raw output (every gpupdate pass, the `gpresult /r` report, the `gpresult /x` XML) is kept per DC in `Logs\3_AL_set_mode-<Mode>-<timestamp>-gpresult\`. The same happens for Enforce and Off. Without `-Refresh`, DCs apply the change at their next refresh (every **5 minutes**) or at boot, and the script says so.
+
+Validation must end with **`Validation: PASSED`**: both GPOs with AD = SYSVOL version, one active link, Application Identity `Running / Auto`, effective policy `Exe/Msi/Script/Appx = AuditOnly`, DC services running, nothing in `C:\Admin` that a non-admin can change is still allowed, and per DC the same gpresult rows as above (`GPO applied`, `GPO processing`, `AppLocker policy events`; raw reports in `Logs\4_AL_validate-<timestamp>-gpresult\`). The DLL and `ManagedInstaller` collections that MECM's managed installer adds are reported (INFO), not judged.
 
 ### Step 7 — The Audit period and review
 
@@ -438,7 +451,8 @@ If nothing appears in step 2, leave `KnownAdmins` empty — even with ten accoun
 | **New DC** | It gets the active GPO at its next refresh (two refreshes or a reboot before the rules load). Run step 3 for `C:\Admin`, then `4_AL_validate.ps1`. If it runs a Windows Server version the others don't, add it to `ExtraReferenceServers` and rebuild (pre-flight warns: `Version <DC>`) |
 | **Rebuild** | `1_AL_build_policy.ps1` → `2_AL_create_gpos.ps1`. In Enforce, switch to Audit first (`3_AL_set_mode.ps1 -Mode Audit -Refresh`), review, then Enforce again |
 | **Updating AccessChk** | On an Internet-connected computer: download AccessChk.zip, take `accesschk64.exe`, check `Get-AuthenticodeSignature` (Valid, Microsoft Corporation) and `Get-FileHash`. Put the new hash in `AccessChkSha256`, then `.\0_AL_get_toolkit.ps1 -AccessChkPath <accesschk64.exe>` (it refuses a file that does not match the pinned hash) |
-| **Audit evidence** | `6_AL_stig_check.ps1` (status + evidence XML) and `4_AL_validate.ps1` (CSV in `Logs\`) |
+| **Audit evidence** | `6_AL_stig_check.ps1` (status + evidence XML) and `4_AL_validate.ps1` (CSV in `Logs\`, gpresult reports in `Logs\4_AL_validate-<ts>-gpresult\`) |
+| **A DC does not apply the policy** | `7_AL_diagnose.ps1 -ComputerName <dc>` (or `-Local` on the DC): event 8000 decoded, components, service, delivered vs effective, gpresult, events; evidence in `Outputs\<profile>\diag-<ts>\` ([Appendix D](#appendix-d--troubleshooting)) |
 
 ---
 
@@ -501,6 +515,31 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | `1_AL_build_policy` with an extra reference that can't run AaronLocker | 5.1 | STOP before the first scan; the DC's work folder removed, nothing written on the refused computer, `latest.txt` unchanged |
 | `2_AL_create_gpos -WhatIf` on the merged build (compare-only GPO names) | 5.1 + 7 | picks the merged rule files; no GPO created |
 | `tests\Test-AL.ps1` | 5.1 + 7 | 182/182; 188/188 with `-BuildFolder` (the real build and the merged build) |
+
+**2026-10-27 (later) - gpupdate / gpresult recorded by `3_AL_set_mode.ps1 -Refresh` and `4_AL_validate.ps1`, `7_AL_diagnose.ps1`, `EnableAppxRules`** - verified against the same Server 2025 DC (in Enforce) from a Windows 11 computer, without changing any GPO or policy:
+
+| Check | Edition | Result |
+|---|---|---|
+| `Invoke-ALGpRefresh -Refresh $true` on DC25-1 (what `3_AL_set_mode.ps1 -Refresh` runs per DC) | 7 | both gpupdate passes captured (exit code 0, *Computer Policy update has completed successfully*); the DC logged 8001 after each pass; gpresult text and XML read; `GPO applied` OK for Enforce (ENFORCE applied, AUDIT `Disabled (Link)`) and FAIL with both reasons named when judged as Audit; `GPO processing` Registry and Security OK; raw files written |
+| `7_AL_diagnose.ps1 -ComputerName DC25-1 -Days 60` | 5.1 + 7 | PASSED: every AppLocker and packaged-app component present with its version, AppIDSvc Running/Auto, appid driver running, event provider and message file present, 38 x 8001 and 0 x 8000, 25 rules delivered = 25 effective, the decisions of the table above, 15 evidence files |
+| `7_AL_diagnose.ps1 -Local` on the Windows 11 computer (no domain, no RSAT) | 5.1 | PASSED: the console path a Server Core DC uses; without a delivered policy the stopped service is reported as normal |
+| `tests\Test-AL.ps1` | 5.1 + 7 | 230/230 |
+
+**2026-10-27/28 - Server Core 2022, the toolkit run on the DC itself.** `DC22-2`, Windows Server 2022 Standard Server Core, the only DC of a second lab forest (no management computer in it), updated first (2026-10 cumulative update, build 20348.4529 to 20348.5761, installed by a SYSTEM scheduled task and a restart), then every script run on the DC over WinRM in Windows PowerShell 5.1:
+
+| # | Step | Result |
+|---|---|---|
+| 1 | `0_AL_pre-flight` | PASSED with 1 warning: `C:\Admin` writable by `BUILTIN\Users` (inherited from `C:\`); PowerShell 2.0 feature Removed |
+| 2 | `0_AL_secure_folders -Fix` | `C:\Admin` permissions replaced (previous SDDL in the transcript); verified SYSTEM + Administrators only |
+| 3 | `1_AL_build_policy` | in-process build on the reference DC (no WinRM to itself); `C:\Admin\*` allowed; Exe 10, Msi 5, Script 9, Appx 1 rules |
+| 4 | `2_AL_create_gpos` | both GPOs created (computer version 2), linked disabled, logs 100 MB |
+| 5 | `3_AL_set_mode -Mode Audit -Refresh` | Audit link enabled; gpupdate 2 passes exit 0; `GPO applied` Audit applied, Enforce `Disabled (Link)`; `GPO processing` Registry + Security OK; AppIDSvc Running/Auto; effective `Exe/Msi/Script/Appx = AuditOnly`; **Refresh (AUDIT): PASSED** |
+| 6 | `4_AL_validate -Mode Audit` | **PASSED** (both GPOs AD = SYSVOL version, one link, service, effective policy, decisions, DC services, gpresult rows) |
+| 7 | `7_AL_diagnose` | PASSED: every component present, 25 rules delivered = 25 effective, **no event 8000**; the 8001 was logged 90 s after the refresh (the diagnosis had run 25 s after it) |
+| 8 | `5_AL_review_events` | 0 would-be-blocked events; 8002 / 8005 allowed events flowing |
+| 9 | `dcdiag /q` | only the DFSREvent and SystemLog tests report events (SYSVOL replication warnings after the promotion of the same day, a Secure Boot certificate notice, an ETW publisher error); nothing AppLocker-related |
+
+Enforce was not enabled on that DC (an Audit period comes first). The event 8000 seen there in an earlier, unrecorded attempt did not recur ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)).
 
 ---
 
@@ -567,7 +606,7 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 | `MSI and Script` | 8005 | **8006** | **8007** |
 | `Packaged app-Execution` | 8020 | **8021** | **8022** |
 
-`8001` = *The AppLocker policy was applied successfully to this computer*; `8000` = policy conversion failed. Each event carries the file, the matching rule, the account (SID) and the publisher. Also see `Microsoft-Windows-AppID/Operational` (the lab DC logs recurring `4005 AppID certificate store verification failed` events; they did not affect enforcement).
+`8001` = *The AppLocker policy was applied successfully to this computer*. `8000` = *AppID policy conversion failed. Status <code>*: Application Identity rejected the policy it was given, so nothing is enforced or audited on that computer; its only field, `Status`, is a Win32 error code (2 = the system cannot find the file specified, 126 = the specified module could not be found, 1168 = element not found, 5 = access denied). `3_AL_set_mode.ps1 -Refresh` and `4_AL_validate.ps1` flag a newest 8000; `7_AL_diagnose.ps1` decodes every 8000 and looks for the cause. The 8002-8022 events carry the file, the matching rule, the account (SID) and the publisher. Also see `Microsoft-Windows-AppID/Operational` (the lab DC logs recurring `4005 AppID certificate store verification failed` events; they did not affect enforcement).
 
 ---
 
@@ -594,6 +633,10 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 | A script runs in *Constrained Language* in Enforce | It was not allowed for that account (non-admin or non-elevated, outside the allowed folders). Elevate, move it to `C:\Admin`, or add a rule |
 | `STOP: … non-interactive` | The script needs Y/N: run it in a console, or add `-NoConfirm` for automation |
 | WinRM errors | `Enable-PSRemoting` on the DC; firewall 5985; use FQDNs |
+| `AppLocker policy events … newest is 8000` (set_mode / validate), or event **8000** *AppID policy conversion failed. Status …* in the *EXE and DLL* log | Application Identity could not convert the delivered policy: the rules are **not loaded** on that DC, nothing is audited or enforced. Run `7_AL_diagnose.ps1 -ComputerName <dc>` (or `-Local` on the DC): it decodes the status, checks the AppLocker and packaged-app components, the service and driver, delivered vs effective policy, gpresult and the related events. On a Server Core DC see [SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied); the first test there is `EnableAppxRules = $false` |
+| *The description for Event ID 8000 (or 8001, 8002, ...) from source Microsoft-Windows-AppLocker cannot be found ... The handle is invalid* | An **Event Viewer window that stayed connected to the DC while the DC restarted** (seen in the lab): its handle to the DC's event log service is no longer valid, so new events still appear but none can be rendered. Close Event Viewer and connect again. The events and the DC are fine; `Get-WinEvent -ComputerName <dc> -LogName 'Microsoft-Windows-AppLocker/EXE and DLL'` renders them meanwhile. An exported `.evtx` opened on a computer without the provider shows the same text unless its `LocaleMetaData` folder is kept with it (`wevtutil epl` + `wevtutil al`). For an 8000 the single number shown is its `Status` ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied), which also shows what a working DC's logs look like) |
+| `GPO applied <DC>` FAIL | gpresult on that DC does not show the expected GPO applied; the row names the reason (`Disabled (Link)`, `Denied (Security)`, not linked, both applied). Run `3_AL_set_mode.ps1` again, check replication (`repadmin /syncall`), read the raw report in `Logs\…-gpresult\` |
+| `GPO processing <DC>` error N | The Registry (AppLocker rules) or Security (service setting) client-side extension failed on that DC with that Win32 error. Group Policy operational log (events 7016 / 1085); `7_AL_diagnose.ps1` lists them |
 
 ---
 
@@ -602,6 +645,9 @@ Size the logs: `wevtutil sl "Microsoft-Windows-AppLocker/EXE and DLL" /ms:104857
 - **Built on a DC itself**, because the rules depend on its disk (user-writable folders, tools present). Build one baseline per server class; the reference must resemble the class, down to its Windows Server version. DCs of two versions in one class: `ExtraReferenceServers` merges a scan of each version into one policy — a union, so it only gets stricter ([SERVER-2022.md](SERVER-2022.md)).
 - **Two GPOs, one enabled link**, so Audit and Enforce never merge and switching is one command. Both GPOs carry the full rule set and the service setting.
 - **DLL rules off** — not required by WN25-00-000080; they add overhead and a high rule-maintenance burden. `EnableDllRules = $true` switches them on (`AuditOnly` / `Enabled` like the rest).
+- **Appx (packaged app) rules on by default** (AaronLocker's *all signed packaged apps* rule, as on the lab DC). Not required by the STIG items; a Server Core DC runs no packaged apps. `EnableAppxRules = $false` empties the collection (`NotConfigured`) in both GPOs, which is the test to make when a Server Core DC rejects the policy with event 8000 ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)).
+- **Every refresh is recorded.** `3_AL_set_mode.ps1 -Refresh` keeps the gpupdate output and a gpresult report per DC and judges them; `4_AL_validate.ps1` repeats the gpresult check; `7_AL_diagnose.ps1` is the read-only deep dive when a DC does not apply the policy.
+- **The toolkit can run on a DC itself** (no management computer in that domain, as in the lab's second forest). A server that is the computer a script runs on is reached in-process instead of over WinRM (`Test-ALLocalComputer` / `Invoke-ALOn` in `AL-Common.ps1`; the build opens no session to itself). Everything else - the other DCs, the GPOs, SYSVOL - is reached exactly as before.
 - **No services enforcement in this baseline** — services are not evaluated (AppLocker's default) unless MECM's managed installer turns it on through its local policy; the baseline is safe either way on DCs (services run as SYSTEM or from the allowed folders).
 - **AaronLocker is not maintained since 2022.** It only *generates XML*; the deployment (GPO, links, service) is plain Group Policy and `Set-AppLockerPolicy`. Keep each `Outputs\<profile>\<ts>` folder: it is what you tested.
 - **Desktop leftovers** in the baseline (the Microsoft Teams publisher rule, the AaronLocker timestamp rule) are harmless on a DC.

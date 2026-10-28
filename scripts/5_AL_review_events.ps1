@@ -98,7 +98,7 @@ try {
     $All = New-Object System.Collections.Generic.List[object]
     foreach ($C in $ComputerName) {
         try {
-            $Out = @(Invoke-Command -ComputerName $C -ScriptBlock $Collect -ArgumentList $Days, $MaxEventsPerLog, ([bool]$Cfg.EnableDllRules) -ErrorAction Stop)
+            $Out = @(Invoke-ALOn $C $Collect ($Days, $MaxEventsPerLog, ([bool]$Cfg.EnableDllRules)))
             $Rows = @($Out | Where-Object { $null -eq $_.PSObject.Properties['DllSkipped'] })
             $Rows | ForEach-Object { $All.Add($_) }
             $Dll = (@($Out | Where-Object { $null -ne $_.PSObject.Properties['DllSkipped'] }) | Measure-Object -Property DllSkipped -Sum).Sum

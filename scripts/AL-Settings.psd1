@@ -14,7 +14,7 @@
     # REQUIRED before 1_AL_build_policy.ps1: the server the baseline is built ON (FQDN), e.g. 'dc01.contoso.com'. It must look like the
     # servers in TargetOUs (same roles, same software, the MECM client and Nessus Agent if they have them) - for the Domain Controllers OU,
     # any DC (the PDC emulator is a good choice). The rules depend on what is on its disk. (Build one policy per server class.)
-    ReferenceServer   = 'DC25-1.skynet-home.local'
+    ReferenceServer   = 'DC22-2.holonet.local'
 
     # Servers in scope that run ANOTHER Windows Server version than ReferenceServer (FQDNs), one per version - e.g. a Server 2022 DC next
     # to Server 2025 DCs: @('dc22-01.contoso.com'). 1_AL_build_policy.ps1 scans each one too and merges every user-writable folder and
@@ -55,6 +55,11 @@
 
     # DLL rules are not needed for the STIG item (WN25-00-000080 / WN22-00-000080) and are switched off. $true keeps AaronLocker's DLL rules.
     EnableDllRules    = $false
+
+    # Packaged app (Appx) rules: AaronLocker's default rule allows every signed packaged app; not required by the STIG items. $false empties
+    # the Appx collection (NotConfigured) in both GPOs - for Server Core installations without packaged-app support, where a policy that
+    # carries an Appx collection may fail to convert (AppLocker event 8000; 7_AL_diagnose.ps1, SERVER-2022.md section 7).
+    EnableAppxRules   = $true
 
     # AppLocker logs allowed executions too; the 1 MB default wraps in minutes on a busy server. Sizes in MB (1-4096).
     EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 100; 'Packaged app-Execution' = 100; 'Packaged app-Deployment' = 100 }

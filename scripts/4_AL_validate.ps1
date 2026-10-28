@@ -10,6 +10,10 @@
     installer's are reported, not judged); that an ExtraAllowedPaths item a non-admin can change is NOT allowed by the policy (that
     would be a bypass); sample rule decisions (Windows tools, the MECM client, Nessus, a file from C:\Admin, for Everyone and for
     Administrators); the core domain controller services; and the AppLocker event counts of the last -EventHours hours.
+    Per server it also runs gpresult /scope computer (text and XML) and judges it against the mode: the expected AppLocker GPO must
+    be applied and the other one not (with the reason gpresult gives, e.g. Disabled (Link)), the Registry and Security extensions must
+    have run without error, and the newest policy event must be 8001 (applied), not 8000 (conversion failed). The raw gpresult output
+    of every server is kept in Logs\4_AL_validate-<timestamp>-gpresult\.
     -Mode Auto (default) expects what the enabled link says; Audit, Enforce or Off asserts that mode.
 
 .PARAMETER SettingsFile
@@ -45,8 +49,8 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-26
-    Version  : 1.0
+    Date     : 2026-10-27
+    Version  : 1.1 (gpresult per server; EnableAppxRules)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules and the AppLocker module; WinRM.
     Changes  : nothing (read-only).
     README   : section 7, step 6; appendix D (troubleshooting).
@@ -64,6 +68,7 @@ $Cfg = Initialize-AL -ScriptName '4_AL_validate' -SettingsFile $SettingsFile -Ov
 $R = New-ALResults
 $Failed = 1
 $DllRules = [bool]$Cfg.EnableDllRules
+$AppxRules = [bool]$Cfg.EnableAppxRules
 
 # Runs on a server. $Extra = the ExtraAllowedPaths setting (a sample file from each is tested).
 $Probe = {
@@ -126,7 +131,7 @@ try {
         if ((Test-Path -LiteralPath $Inf) -and ((Get-Content -LiteralPath $Inf -Raw) -match '"AppIDSvc",2')) { Add-ALResult $R 'OK' "$($G[0]) GPO System Services" 'Application Identity = Automatic' } else { Add-ALResult $R 'FAIL' "$($G[0]) GPO System Services" 'AppIDSvc startup setting missing in GptTmpl.inf' }
         [xml]$InGpo = Get-AppLockerPolicy -Domain -Ldap "LDAP://$($Domain.PDC)/$($Gpo.Path)" -Xml
         foreach ($Id in @($InGpo.SelectNodes('//*[@Id]') | ForEach-Object { $_.GetAttribute('Id') })) { $OurIds[$Id] = $true }
-        $Bad = @($InGpo.AppLockerPolicy.RuleCollection | Where-Object { $_.EnforcementMode -ne (Get-ALExpectedMode $G[0] $_.Type $DllRules) })
+        $Bad = @($InGpo.AppLockerPolicy.RuleCollection | Where-Object { $_.EnforcementMode -ne (Get-ALExpectedMode $G[0] $_.Type $DllRules $AppxRules) })
         $Txt = Get-ALPolicySummary $InGpo
         if ($Bad.Count -eq 0 -and $InGpo.AppLockerPolicy.RuleCollection) { Add-ALResult $R 'OK' "$($G[0]) rules in GPO" $Txt } else { Add-ALResult $R 'FAIL' "$($G[0]) rules in GPO" "unexpected or empty: $Txt" }
     }
@@ -150,7 +155,7 @@ try {
     if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
     if (-not @($ComputerName).Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
     foreach ($C in $ComputerName) {
-        try { $Dc = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ArgumentList $EventHours, @($Cfg.ExtraAllowedPaths) -ErrorAction Stop }
+        try { $Dc = Invoke-ALOn $C $Probe ($EventHours, @($Cfg.ExtraAllowedPaths)) }
         catch { Add-ALResult $R 'FAIL' "WinRM $C" $_.Exception.Message; continue }
         $IsMi = @($Dc.LocalTypes | Where-Object { $_ -like 'ManagedInstaller=*' }).Count -gt 0
         if ($Expect -eq 'Off') {
@@ -160,10 +165,10 @@ try {
         else {
             if ($Dc.Svc.State -eq 'Running' -and $Dc.Svc.StartMode -eq 'Auto') { Add-ALResult $R 'OK' "AppIDSvc $C" "$($Dc.Svc.State) / $($Dc.Svc.StartMode)" } else { Add-ALResult $R 'FAIL' "AppIDSvc $C" "$($Dc.Svc.State) / $($Dc.Svc.StartMode) (expected Running / Auto; run gpupdate twice or reboot)" }
             $Eff = Get-ALPolicySummary $Dc.Policy
-            $Mismatch = if ($Expect) { @(Get-ALPolicyMismatch $Dc.Policy $Expect $DllRules) } else { @('mode unknown') }
+            $Mismatch = if ($Expect) { @(Get-ALPolicyMismatch $Dc.Policy $Expect $DllRules $AppxRules) } else { @('mode unknown') }
             if ($Mismatch.Count -eq 0) { Add-ALResult $R 'OK' "Effective policy $C" $Eff } else { Add-ALResult $R 'FAIL' "Effective policy $C" "not applied or unexpected: $($Mismatch -join '; ') - effective: $Eff" }
             # Collections from other policies (the MECM managed installer's): reported, not judged
-            $Managed = Get-ALManagedCollections $DllRules
+            $Managed = Get-ALManagedCollections $DllRules $AppxRules
             $Foreign = @($Dc.Policy.AppLockerPolicy.RuleCollection | Where-Object { $_.Type -notin $Managed -and @($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count } | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)" })
             if ($Foreign.Count) { Add-ALResult $R 'INFO' "Other collections $C" "$($Foreign -join ', ') - not managed by this baseline$(if ($IsMi) { ' (MECM managed installer: DLL rules stay audit-only, nothing is blocked by them)' })" }
         }
@@ -175,6 +180,17 @@ try {
         foreach ($T in $Dc.Tests) { Add-ALResult $R 'INFO' "Decision $C" "$($T.User) -> $(Split-Path $T.File -Leaf): $($T.Decision) ($($T.Rule))" }
         $Down = @($Dc.Services | Where-Object { $_ -notmatch '=Running' })
         if ($Down.Count -eq 0) { Add-ALResult $R 'OK' "Services $C" ($Dc.Services -join ', ') } else { Add-ALResult $R 'FAIL' "Services $C" ($Dc.Services -join ', ') }
+        # gpresult: which AppLocker GPO Group Policy applied here, whether its Registry and Security extensions ran without error, the
+        # newest policy event (8001 applied / 8000 conversion failed), when and from which DC it was applied (README, step 6)
+        try {
+            $Gp = Invoke-ALGpRefresh -ComputerName $C -Refresh $false
+            $GpFile = Save-ALGpResult $Gp (Join-Path $Cfg.LogDir "$($Cfg.ScriptName)-$($Cfg.Stamp)-gpresult")
+            $GpIds = @{}
+            if ($Audit) { $GpIds["$($Audit.Id)"] = $Cfg.AuditGpoName }
+            if ($Enforce) { $GpIds["$($Enforce.Id)"] = $Cfg.EnforceGpoName }
+            Add-ALGpResults $R $C $Gp (Resolve-ALGpoNames (ConvertFrom-ALGpResult $Gp.GpresultXml $Gp.GpresultText) $GpIds) $(if ($Expect) { $Expect } else { 'Any' }) $Cfg.AuditGpoName $Cfg.EnforceGpoName $GpFile
+        }
+        catch { Add-ALResult $R 'WARN' "gpresult $C" "could not be collected: $($_.Exception.Message)" }
         # A non-admin-writable item in an ExtraAllowedPaths folder is only a problem if the policy still allows it (a bypass)
         if (@($Cfg.ExtraAllowedPaths).Count) {
             try {

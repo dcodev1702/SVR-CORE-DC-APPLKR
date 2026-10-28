@@ -8,10 +8,15 @@
       -Mode Audit    Audit GPO link enabled,   Enforce GPO link disabled   (logs only, blocks nothing)
       -Mode Enforce  Enforce GPO link enabled, Audit GPO link disabled     (BLOCKS what the rules do not allow)
       -Mode Off      both links disabled                                   (the AppLocker rules are removed at the next refresh)
-    -Refresh also runs gpupdate twice on every server in the target OUs over WinRM (the rules load on the second pass); otherwise the
-    servers pick the change up at their next Group Policy refresh (every 5 minutes on domain controllers, 90-120 minutes on member
-    servers) or at boot. Already in that mode: nothing changes and there is no prompt. -WhatIf shows the link changes without making
-    them. Rolling back from Enforce is the same command with -Mode Audit.
+    -Refresh then runs gpupdate /target:computer /force twice on every server in the target OUs over WinRM (the rules load on the
+    second pass) and records the result for every mode: the full gpupdate output, gpresult /scope computer (which GPOs applied, which
+    were filtered out and why, whether the Registry and Security extensions ran without error), Application Identity, the effective
+    AppLocker policy and the newest policy event (8001 applied / 8000 conversion failed). The verdict is judged against the mode just
+    set (OK / WARN / FAIL table, Logs\3_AL_set_mode-<Mode>-<timestamp>.csv); the raw gpupdate and gpresult output of every server is
+    kept in Logs\3_AL_set_mode-<Mode>-<timestamp>-gpresult\. Without -Refresh the servers pick the change up at their next Group Policy
+    refresh (every 5 minutes on domain controllers, 90-120 minutes on member servers) or at boot. Already in that mode: no link
+    changes and no prompt (the refresh still runs). -WhatIf shows the link changes without making them. Rolling back from Enforce
+    is the same command with -Mode Audit.
 
 .PARAMETER Mode
     Audit, Enforce or Off (see above). Required.
@@ -23,7 +28,7 @@
     Distinguished names of the OUs whose links are switched. Overrides the TargetOUs setting. Default: the Domain Controllers OU.
 
 .PARAMETER Refresh
-    Run gpupdate twice on every server in the target OUs after the links are switched.
+    Run gpupdate twice on every server in the target OUs after the links are switched, then gpresult; show and log the results.
 
 .PARAMETER NoConfirm
     Skip the yellow Y/N prompt (automation). A non-interactive session without -NoConfirm stops before any change.
@@ -35,8 +40,12 @@
     None. Nothing can be piped to this script.
 
 .OUTPUTS
-    None to the pipeline. Console: the link change per OU ("enabled = True/False"), the gpupdate result per server with -Refresh, and
-    "Mode is now AUDIT / ENFORCE / OFF". Transcript in Logs\3_AL_set_mode-<Mode>-<timestamp>.log. Exit code 1 on a STOP.
+    None to the pipeline. Console: the link change per OU ("enabled = True/False"); with -Refresh, per server, the output of both
+    gpupdate passes and a Status / Check / Detail table (gpupdate, GPO applied, GPO processing, AppLocker policy events, Group Policy,
+    AppIDSvc, Effective policy) ending in "Refresh (<MODE>): PASSED" or "FAILED"; then "Mode is now AUDIT / ENFORCE / OFF". Files:
+    Logs\3_AL_set_mode-<Mode>-<timestamp>.csv (the table), Logs\3_AL_set_mode-<Mode>-<timestamp>-gpresult\<server>-gpresult.txt (the
+    raw gpupdate output and the gpresult /r report) and <server>-gpresult.xml (gpresult /x), transcript in
+    Logs\3_AL_set_mode-<Mode>-<timestamp>.log. Exit code 1 on a STOP.
 
 .EXAMPLE
     .\3_AL_set_mode.ps1 -Mode Audit -Refresh
@@ -53,8 +62,8 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-26
-    Version  : 1.0
+    Date     : 2026-10-27
+    Version  : 1.1 (-Refresh keeps the gpupdate output and records gpresult, judged against the mode)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules; link GPOs; WinRM for -Refresh.
     Changes  : domain - the enabled state of the two GPO links on the target OUs. With -Refresh: a gpupdate on the servers.
     Undo     : run again with the previous -Mode.
@@ -116,8 +125,37 @@ try {
     }
     if ($Refresh -and -not $WhatIfPreference) {
         if (-not $Targets.Count) { Write-Warning 'No servers found in the target OUs to refresh.' }
-        Invoke-ALRefresh $Targets | ForEach-Object { Write-Host $_ }
+        # Per server: gpupdate twice with its output kept, then gpresult - which AppLocker GPO applied, the Registry and Security
+        # extensions, the newest policy event, Application Identity and the effective policy. Table + CSV; raw output in a folder.
+        $R = New-ALResults
+        $Folder = Join-Path $Cfg.LogDir "$($Cfg.ScriptName)-$($Cfg.Stamp)-gpresult"
+        foreach ($C in $Targets) {
+            Write-Host "`n$C : gpupdate /target:computer /force (two passes), then gpresult /scope computer ..." -ForegroundColor Cyan
+            try { $Raw = Invoke-ALGpRefresh -ComputerName $C -Refresh $true }
+            catch { Add-ALResult $R 'FAIL' "Refresh $C" "WinRM: $($_.Exception.Message)"; continue }
+            $File = Save-ALGpResult $Raw $Folder
+            foreach ($G in @($Raw.Gpupdate)) { Write-Host ('  ' + ($G -replace '\r?\n', "`r`n  ")) }
+            $Bad = @($Raw.GpupdateExit | Where-Object { $_ -ne 0 })
+            $Said = @($Raw.Gpupdate | ForEach-Object { @(($_ -split '\r?\n') | Select-Object -Skip 1 | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^Updating policy' }) -join ' ' })
+            Add-ALResult $R $(if ($Bad.Count) { 'FAIL' } else { 'OK' }) "gpupdate $C" "$(@($Raw.Gpupdate).Count) passes, exit codes $($Raw.GpupdateExit -join ', '): $($Said -join ' | ')"
+            $Report = Resolve-ALGpoNames (ConvertFrom-ALGpResult $Raw.GpresultXml $Raw.GpresultText) @{ "$($Audit.Id)" = $Cfg.AuditGpoName; "$($Enforce.Id)" = $Cfg.EnforceGpoName }
+            Add-ALGpResults $R $C $Raw $Report $Mode $Cfg.AuditGpoName $Cfg.EnforceGpoName $File
+            if ($Mode -eq 'Off') { Add-ALResult $R 'INFO' "AppIDSvc $C" $Raw.AppIdSvc }
+            elseif ($Raw.AppIdSvc -eq 'Running/Auto') { Add-ALResult $R 'OK' "AppIDSvc $C" $Raw.AppIdSvc }
+            else { Add-ALResult $R 'WARN' "AppIDSvc $C" "$($Raw.AppIdSvc) - expected Running/Auto; run again with -Refresh or reboot, then 4_AL_validate.ps1" }
+            $Eff = $null
+            try { if ($Raw.EffectiveXml) { $Eff = [xml]$Raw.EffectiveXml } } catch { }
+            if ($Mode -eq 'Off') { Add-ALResult $R 'INFO' "Effective policy $C" "$($Raw.Effective) - the rules of the AppLocker GPOs go away with the refresh after both links are disabled (4_AL_validate.ps1 -Mode Off checks)" }
+            elseif (-not $Eff) { Add-ALResult $R 'WARN' "Effective policy $C" $Raw.Effective }
+            else {
+                $Mismatch = @(Get-ALPolicyMismatch $Eff $Mode ([bool]$Cfg.EnableDllRules) ([bool]$Cfg.EnableAppxRules))
+                if ($Mismatch.Count) { Add-ALResult $R 'WARN' "Effective policy $C" "not as expected for ${Mode}: $($Mismatch -join '; ') - effective: $($Raw.Effective). Run again with -Refresh or wait for the next refresh; if it stays, 7_AL_diagnose.ps1" }
+                else { Add-ALResult $R 'OK' "Effective policy $C" "$($Raw.Effective) - as expected for $Mode" }
+            }
+        }
+        if ($Targets.Count) { [void](Write-ALResults $R $Cfg "Refresh ($($Mode.ToUpper()))"); Write-Host "Raw gpupdate and gpresult output per server: $Folder" }
     }
+    elseif (-not $WhatIfPreference) { Write-Host 'No -Refresh: the servers apply the link change at their next Group Policy refresh (every 5 minutes on domain controllers, 90-120 minutes on member servers). Run with -Refresh to run gpupdate now and record gpresult, or 4_AL_validate.ps1 to check.' }
     if (-not $WhatIfPreference) { Write-Host "Mode is now $($Mode.ToUpper()). Verify with 4_AL_validate.ps1." -ForegroundColor Green }
 }
 finally { Stop-ALTranscript }

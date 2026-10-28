@@ -118,6 +118,7 @@ try {
     Assert 'settings: ExtraReferenceServers FQDNs accepted' (-not (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @('dc22-01.contoso.com', 'DC22-02') }) 'x' } '*'))
     Assert 'settings: ExtraReferenceServers missing, $null or empty entries = not set' (-not (Throws { Assert-ALSettings (Get-BaseCfg) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = $null }) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = @('') }) 'x' } '*'))
     foreach ($S in 'dc22; whoami', 'C:\x', '-dc22', 'dc22 .contoso.com') { Assert "settings: ExtraReferenceServers '$S' refused" (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @($S) }) 'x' }) }
+    Assert 'settings: the shipped settings file has EnableAppxRules = $true' ((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).EnableAppxRules -eq $true)
     Assert 'settings: the shipped settings file has ExtraReferenceServers (empty)' (@((Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ExtraReferenceServers).Count -eq 0 -and (Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'scripts\AL-Settings.psd1')).ContainsKey('ExtraReferenceServers'))
 
     # ---- Windows Server versions and STIG items
@@ -329,9 +330,154 @@ try {
     Set-Content -LiteralPath $Xml -Encoding Unicode -Value '<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="Enabled"><FilePathRule Id="1" Name="n" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions></FilePathRule><RuleCollectionExtensions><ThresholdExtensions><Services EnforcementMode="NotConfigured" /></ThresholdExtensions><RedstoneExtensions><SystemApps Allow="NotConfigured" /></RedstoneExtensions></RuleCollectionExtensions></RuleCollection><RuleCollection Type="Dll" EnforcementMode="Enabled"><FilePathRule Id="2" Name="d" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="*" /></Conditions></FilePathRule></RuleCollection></AppLockerPolicy>'
     $Sum = New-ALDeployXml -SourceXml $Xml -Mode Enforce -DllRules $false -OutFile (Join-Path $Tmp 'd.xml')
     Assert 'deploy XML: DLL emptied + NotConfigured, extensions not counted as rules' ($Sum -eq 'Dll=NotConfigured(0), Exe=Enabled(1)') $Sum
+    $Xml2 = Join-Path $Tmp 'p2.xml'
+    Set-Content -LiteralPath $Xml2 -Encoding Unicode -Value '<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="AuditOnly"><FilePathRule Id="1" Name="n" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions></FilePathRule></RuleCollection><RuleCollection Type="Appx" EnforcementMode="AuditOnly"><FilePublisherRule Id="2" Name="a" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePublisherCondition PublisherName="*" ProductName="*" BinaryName="*"><BinaryVersionRange LowSection="0.0.0.0" HighSection="*" /></FilePublisherCondition></Conditions></FilePublisherRule></RuleCollection></AppLockerPolicy>'
+    Assert 'deploy XML: the Appx collection is kept by default' ((New-ALDeployXml -SourceXml $Xml2 -Mode Audit -DllRules $false -OutFile (Join-Path $Tmp 'g.xml')) -eq 'Appx=AuditOnly(1), Exe=AuditOnly(1)')
+    Assert 'deploy XML: EnableAppxRules off empties the Appx collection (NotConfigured)' ((New-ALDeployXml -SourceXml $Xml2 -Mode Audit -DllRules $false -OutFile (Join-Path $Tmp 'h.xml') -AppxRules $false) -eq 'Appx=NotConfigured(0), Exe=AuditOnly(1)')
+    Assert 'managed collections / expected mode with Appx off' (((Get-ALManagedCollections $false $false) -join ',') -eq 'Exe,Msi,Script' -and (Get-ALExpectedMode 'Enforce' 'Appx' $false $false) -eq 'NotConfigured' -and (Get-ALExpectedMode 'Enforce' 'Appx' $false $true) -eq 'Enabled' -and ((Get-ALManagedCollections $true) -join ',') -eq 'Exe,Msi,Script,Appx,Dll')
+    Assert 'mismatch: with Appx off, an Appx collection is neither judged nor required' (@(Get-ALPolicyMismatch ([xml]"<AppLockerPolicy Version=`"1`"><RuleCollection Type=`"Exe`" EnforcementMode=`"Enabled`" /><RuleCollection Type=`"Msi`" EnforcementMode=`"Enabled`" /><RuleCollection Type=`"Script`" EnforcementMode=`"Enabled`" /></AppLockerPolicy>") 'Enforce' $false $false).Count -eq 0 -and @(Get-ALPolicyMismatch ([xml]"<AppLockerPolicy Version=`"1`"><RuleCollection Type=`"Exe`" EnforcementMode=`"Enabled`" /><RuleCollection Type=`"Msi`" EnforcementMode=`"Enabled`" /><RuleCollection Type=`"Script`" EnforcementMode=`"Enabled`" /></AppLockerPolicy>") 'Enforce' $false).Count -eq 1)
     Assert 'deploy XML: Enforce source refused for Audit' (Throws { New-ALDeployXml -SourceXml $Xml -Mode Audit -DllRules $false -OutFile (Join-Path $Tmp 'e.xml') })
     (Get-Content -LiteralPath $Xml -Raw) -replace 'Type="Dll"', 'Type="ManagedInstaller"' | Set-Content -LiteralPath $Xml -Encoding Unicode
     Assert 'deploy XML: ManagedInstaller collection refused' (Throws { New-ALDeployXml -SourceXml $Xml -Mode Enforce -DllRules $false -OutFile (Join-Path $Tmp 'f.xml') })
+    # ---- this computer vs a server: Test-ALLocalComputer / Invoke-ALOn (the toolkit run on a DC itself)
+    $CsInfo = Get-CimInstance Win32_ComputerSystem
+    $MyFqdn = "$($CsInfo.DNSHostName).$($CsInfo.Domain)"
+    Assert 'local computer: own name, FQDN, localhost, 127.0.0.1, trailing dot' ((Test-ALLocalComputer $env:COMPUTERNAME) -and (Test-ALLocalComputer $env:COMPUTERNAME.ToLower()) -and (Test-ALLocalComputer $MyFqdn) -and (Test-ALLocalComputer "$MyFqdn.") -and (Test-ALLocalComputer 'localhost') -and (Test-ALLocalComputer '127.0.0.1'))
+    Assert 'local computer: another name, an empty name, another address are not local' (-not (Test-ALLocalComputer 'dc01.contoso.com') -and -not (Test-ALLocalComputer '') -and -not (Test-ALLocalComputer '203.0.113.7') -and -not (Test-ALLocalComputer "x$env:COMPUTERNAME"))
+    Assert 'invoke on: this computer runs the block in-process with positional arguments' ((Invoke-ALOn 'localhost' { param($A, $B) "$A|$($B -join ',')|$env:COMPUTERNAME" } ('x', @('y', 'z'))) -eq "x|y,z|$env:COMPUTERNAME")
+    Assert 'invoke on: a single array argument stays one parameter with (, $Array)' ((Invoke-ALOn $env:COMPUTERNAME { param([string[]]$P) $P.Count } (, @('p', 'q'))) -eq 2)
+    Assert 'invoke on: no arguments, and an empty array argument' (((Invoke-ALOn 'localhost' { 'ran' }) -eq 'ran') -and ((Invoke-ALOn 'localhost' { param([string[]]$P, [string[]]$K) "$(@($P).Count)|$(@($K | Where-Object { $_ }).Count)" } (@('a', 'b'), @())) -eq '2|0'))
+    Assert 'invoke on: a hashtable argument' ((Invoke-ALOn 'localhost' { param($Sizes) $Sizes['EXE and DLL'] } (, @{ 'EXE and DLL' = 100 })) -eq 100)
+    Assert 'writable check: this computer is checked in-process (no WinRM)' (@(Invoke-ALWritableCheck -Paths @("$Dir\*") -Cfg @{ KnownAdmins = @($Me) } -ComputerName 'localhost') | Where-Object { $_.Kind -eq 'WRITABLE' -and $_.Computer -eq 'localhost' }).Count -ge 1
+
+    # ---- gpresult: the text report, the RSoP XML, the verdict per mode, the result rows, the Win32 messages, the raw-output file
+    $GpText = @"
+
+Microsoft (R) Windows (R) Operating System Group Policy Result tool v2.0
+Created on 10/27/2026 at 2:04:19 PM
+
+RSOP data for  on DC25-1 : Logging Mode
+----------------------------------------
+
+COMPUTER SETTINGS
+------------------
+    CN=DC25-1,OU=Domain Controllers,DC=skynet-home,DC=local
+    Last time Group Policy was applied: 10/27/2026 at 2:01:37 PM
+    Group Policy was applied from:      DC25-1.skynet-home.local
+    Domain Name:                        SKYNET
+
+    Applied Group Policy Objects
+    -----------------------------
+        Default Domain Controllers Policy
+        E
+        Default Domain Policy
+
+    The following GPOs were not applied because they were filtered out
+    -------------------------------------------------------------------
+        A
+            Filtering:  Disabled (Link)
+
+        Local Group Policy
+            Filtering:  Not Applied (Empty)
+
+    The computer is a part of the following security groups
+    -------------------------------------------------------
+        BUILTIN\Administrators
+        Everyone
+
+USER SETTINGS
+--------------
+    Applied Group Policy Objects
+    -----------------------------
+        N/A
+"@
+    $GpT = ConvertFrom-ALGpResultText $GpText
+    Assert 'gpresult text: applied GPOs in order' (($GpT.Applied -join '|') -eq 'Default Domain Controllers Policy|E|Default Domain Policy') ($GpT.Applied -join '|')
+    Assert 'gpresult text: filtered-out GPOs with their reason' ($GpT.NotApplied.Count -eq 2 -and $GpT.NotApplied[0].Name -eq 'A' -and $GpT.NotApplied[0].Reason -eq 'Disabled (Link)' -and $GpT.NotApplied[1].Name -eq 'Local Group Policy' -and $GpT.NotApplied[1].Reason -eq 'Not Applied (Empty)')
+    Assert 'gpresult text: last applied / applied from' ($GpT.LastApplied -eq '10/27/2026 at 2:01:37 PM' -and $GpT.AppliedFrom -eq 'DC25-1.skynet-home.local')
+    $GpNone = ConvertFrom-ALGpResultText "COMPUTER SETTINGS`r`n------------------`r`n    Applied Group Policy Objects`r`n    -----------------------------`r`n        N/A`r`n`r`n    The following GPOs were not applied because they were filtered out`r`n    -------------------------------------------------------------------`r`n        Local Group Policy`r`n            Filtering:  Not Applied (Empty)`r`n"
+    Assert 'gpresult text: N/A means nothing applied' ($GpNone.Applied.Count -eq 0 -and $GpNone.NotApplied.Count -eq 1)
+    Assert 'gpresult text: another language or no report gives nothing' ((ConvertFrom-ALGpResultText 'COMPUTEREINSTELLUNGEN').Applied.Count -eq 0 -and (ConvertFrom-ALGpResultText '').NotApplied.Count -eq 0)
+    $Rsop = { param($AuditLink, $EnforceDenied, $SecurityError) @"
+<?xml version="1.0" encoding="utf-16"?>
+<Rsop xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://www.microsoft.com/GroupPolicy/Rsop">
+  <ReadTime>2026-10-27T21:04:20.8732162Z</ReadTime>
+  <ComputerResults>
+    <Name>SKYNET\DC25-1$</Name>
+    <GPO><Name>Default Domain Controllers Policy</Name><Path><Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">{6AC1786C-016F-11D2-945F-00C04fB984F9}</Identifier><Domain xmlns="http://www.microsoft.com/GroupPolicy/Types">skynet-home.local</Domain></Path><VersionDirectory>1</VersionDirectory><VersionSysvol>1</VersionSysvol><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>false</AccessDenied><Link><SOMPath>skynet-home.local/Domain Controllers</SOMPath><SOMOrder>3</SOMOrder><AppliedOrder>3</AppliedOrder><LinkOrder>5</LinkOrder><Enabled>true</Enabled><NoOverride>false</NoOverride></Link><ExtensionName>Security</ExtensionName></GPO>
+    <GPO><Name>Local Group Policy</Name><Path><Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">LocalGPO</Identifier></Path><VersionDirectory>0</VersionDirectory><VersionSysvol>0</VersionSysvol><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>false</AccessDenied><Link><SOMPath>Local</SOMPath><SOMOrder>1</SOMOrder><AppliedOrder>0</AppliedOrder><LinkOrder>1</LinkOrder><Enabled>true</Enabled><NoOverride>false</NoOverride></Link></GPO>
+    <GPO><Name>E</Name><Path><Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">{815454EA-3B6C-4FE3-9F58-4248F45B450E}</Identifier><Domain xmlns="http://www.microsoft.com/GroupPolicy/Types">skynet-home.local</Domain></Path><VersionDirectory>2</VersionDirectory><VersionSysvol>2</VersionSysvol><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>$EnforceDenied</AccessDenied><Link><SOMPath>skynet-home.local/Domain Controllers</SOMPath><SOMOrder>1</SOMOrder><AppliedOrder>$(if ($EnforceDenied -eq 'true') { 0 } else { 2 })</AppliedOrder><LinkOrder>3</LinkOrder><Enabled>true</Enabled><NoOverride>false</NoOverride></Link><ExtensionName>Security</ExtensionName><ExtensionName>Registry</ExtensionName></GPO>
+    <GPO><Name>Default Domain Policy</Name><Path><Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">{31B2F340-016D-11D2-945F-00C04FB984F9}</Identifier><Domain xmlns="http://www.microsoft.com/GroupPolicy/Types">skynet-home.local</Domain></Path><VersionDirectory>1</VersionDirectory><VersionSysvol>1</VersionSysvol><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>false</AccessDenied><Link><SOMPath>skynet-home.local</SOMPath><SOMOrder>1</SOMOrder><AppliedOrder>1</AppliedOrder><LinkOrder>2</LinkOrder><Enabled>true</Enabled><NoOverride>false</NoOverride></Link><ExtensionName>Security</ExtensionName></GPO>
+    <GPO><Name>A</Name><Path><Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">{90611251-4E0A-441B-8967-84BBA320FDA5}</Identifier><Domain xmlns="http://www.microsoft.com/GroupPolicy/Types">skynet-home.local</Domain></Path><VersionDirectory>2</VersionDirectory><VersionSysvol>2</VersionSysvol><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>false</AccessDenied><Link><SOMPath>skynet-home.local/Domain Controllers</SOMPath><SOMOrder>2</SOMOrder><AppliedOrder>$(if ($AuditLink -eq 'true') { 4 } else { 0 })</AppliedOrder><LinkOrder>4</LinkOrder><Enabled>$AuditLink</Enabled><NoOverride>false</NoOverride></Link><ExtensionName>Security</ExtensionName><ExtensionName>Registry</ExtensionName></GPO>
+    <ExtensionStatus><Name>Group Policy Infrastructure</Name><Identifier>{00000000-0000-0000-0000-000000000000}</Identifier><BeginTime>2026-10-27T21:01:37</BeginTime><EndTime>2026-10-27T21:01:37</EndTime><LoggingStatus>Complete</LoggingStatus><Error>0</Error></ExtensionStatus>
+    <ExtensionStatus><Name>Registry</Name><Identifier>{35378EAC-683F-11D2-A89A-00C04FBBCFA2}</Identifier><BeginTime>2026-10-26T18:36:18</BeginTime><EndTime>2026-10-26T18:36:18</EndTime><LoggingStatus>Complete</LoggingStatus><Error>0</Error></ExtensionStatus>
+    <ExtensionStatus><Name>Security</Name><Identifier>{827D319E-6EAC-11D2-A4EA-00C04F79F83A}</Identifier><BeginTime>2026-10-26T18:36:18</BeginTime><EndTime>2026-10-26T18:36:19</EndTime><LoggingStatus>Complete</LoggingStatus><Error>$SecurityError</Error></ExtensionStatus>
+  </ComputerResults>
+</Rsop>
+"@ }
+    $Rep = ConvertFrom-ALGpResult (& $Rsop 'false' 'false' 0) $GpText
+    Assert 'gpresult xml: applied = AppliedOrder > 0, highest precedence first, like the text report' (($Rep.Applied -join '|') -eq 'Default Domain Controllers Policy|E|Default Domain Policy' -and $Rep.Source -eq 'xml') ($Rep.Applied -join '|')
+    $NotA = @($Rep.Gpos | Where-Object { -not $_.Applied })
+    Assert 'gpresult xml: a disabled link and an empty local policy are not applied, with the reason' ($NotA.Count -eq 2 -and @($NotA | Where-Object { $_.Name -eq 'A' -and $_.Reason -eq 'Disabled (Link)' -and -not $_.LinkEnabled }).Count -eq 1 -and @($NotA | Where-Object { $_.Name -eq 'Local Group Policy' -and $_.Reason -eq 'Not Applied (Empty)' }).Count -eq 1) (($NotA | ForEach-Object { "$($_.Name):$($_.Reason)" }) -join ';')
+    Assert 'gpresult xml: GPO id, versions and link read' (@($Rep.Gpos | Where-Object { $_.Name -eq 'E' -and $_.Id -eq '{815454EA-3B6C-4FE3-9F58-4248F45B450E}' -and $_.VersionDirectory -eq 2 -and $_.VersionSysvol -eq 2 -and $_.Link -eq 'skynet-home.local/Domain Controllers' }).Count -eq 1)
+    Assert 'gpresult xml: extensions with their error codes' ($Rep.Extensions.Count -eq 3 -and @($Rep.Extensions | Where-Object { $_.Name -eq 'Registry' -and $_.Id -eq '{35378EAC-683F-11D2-A89A-00C04FBBCFA2}' -and $_.Error -eq 0 }).Count -eq 1)
+    Assert 'gpresult xml: last applied / applied from come from the text' ($Rep.LastApplied -eq '10/27/2026 at 2:01:37 PM' -and $Rep.AppliedFrom -eq 'DC25-1.skynet-home.local')
+    $RepDenied = ConvertFrom-ALGpResult (& $Rsop 'false' 'true' 5) ''
+    Assert 'gpresult xml: access denied is a reason; a failed extension keeps its code' (@($RepDenied.Gpos | Where-Object { $_.Name -eq 'E' -and -not $_.Applied -and $_.Reason -eq 'Denied (Security)' }).Count -eq 1 -and @($RepDenied.Extensions | Where-Object { $_.Name -eq 'Security' -and $_.Error -eq 5 }).Count -eq 1 -and $RepDenied.LastApplied -eq '')
+    $RepText = ConvertFrom-ALGpResult '<not xml' $GpText
+    Assert 'gpresult: unreadable XML falls back to the text report' ($RepText.Source -eq 'text' -and ($RepText.Applied -join '|') -eq 'Default Domain Controllers Policy|E|Default Domain Policy' -and @($RepText.Gpos | Where-Object { $_.Name -eq 'A' -and $_.Reason -eq 'Disabled (Link)' -and -not $_.LinkEnabled }).Count -eq 1)
+    Assert 'gpresult: nothing readable at all' ((ConvertFrom-ALGpResult '' '').Source -eq '' -and @((ConvertFrom-ALGpResult '' '').Applied).Count -eq 0)
+    $RepGuid = ConvertFrom-ALGpResult ((& $Rsop 'false' 'false' 0) -replace '<Name>A</Name>', '<Name>{90611251-4E0A-441B-8967-84BBA320FDA5}</Name>') ''
+    Assert 'gpresult names: a never-applied GPO is listed by GUID until the toolkit maps it' (@($RepGuid.Gpos | Where-Object { $_.Name -eq '{90611251-4E0A-441B-8967-84BBA320FDA5}' }).Count -eq 1)
+    [void](Resolve-ALGpoNames $RepGuid @{ '90611251-4e0a-441b-8967-84bba320fda5' = 'A'; '{815454EA-3B6C-4FE3-9F58-4248F45B450E}' = 'E' })
+    Assert 'gpresult names: mapped back to the GPO names (any GUID case or braces), applied list rebuilt' (@($RepGuid.Gpos | Where-Object { $_.Name -eq 'A' -and -not $_.Applied -and $_.Reason -eq 'Disabled (Link)' }).Count -eq 1 -and ($RepGuid.Applied -join '|') -eq 'Default Domain Controllers Policy|E|Default Domain Policy' -and (Get-ALGpVerdict $RepGuid 'Audit' 'A' 'E').Problems[0] -like "'A' is not applied (Disabled (Link))*")
+    Assert 'gpresult names: an empty map changes nothing' (((Resolve-ALGpoNames $Rep @{}).Applied -join '|') -eq 'Default Domain Controllers Policy|E|Default Domain Policy')
+    $V = Get-ALGpVerdict $Rep 'Enforce' 'A' 'E'
+    Assert 'verdict: Enforce with the Enforce GPO applied and the Audit link disabled is OK' ($V.Ok -and $V.Found -eq 'Default Domain Controllers Policy, E, Default Domain Policy' -and $V.Expected -eq 'E applied, A not applied') ($V.Problems -join '; ')
+    $V = Get-ALGpVerdict $Rep 'Audit' 'A' 'E'
+    Assert 'verdict: Audit while Enforce applies names both problems' (-not $V.Ok -and $V.Problems.Count -eq 2 -and $V.Problems[0] -like "'A' is not applied (Disabled (Link))*" -and $V.Problems[1] -like "'E' is applied but must not be*3_AL_set_mode.ps1 -Mode Audit*") ($V.Problems -join '; ')
+    $V = Get-ALGpVerdict $Rep 'Off' 'A' 'E'
+    Assert 'verdict: Off while Enforce applies is a problem' (-not $V.Ok -and $V.Problems.Count -eq 1 -and $V.Problems[0] -like "'E' is applied but must not be (mode Off)*" -and $V.Expected -eq 'neither A nor E applied')
+    $V = Get-ALGpVerdict (ConvertFrom-ALGpResult (& $Rsop 'true' 'true' 0) '') 'Audit' 'A' 'E'
+    Assert 'verdict: Audit with the Audit GPO applied and the Enforce GPO denied is OK' $V.Ok ($V.Problems -join '; ')
+    $V = Get-ALGpVerdict (ConvertFrom-ALGpResult '' '') 'Audit' 'A' 'E'
+    Assert 'verdict: no report at all is a problem that names the missing GPO' (-not $V.Ok -and $V.Problems.Count -eq 2 -and $V.Problems[0] -like "'A' is not applied (not linked*" -and $V.Problems[1] -eq 'gpresult gave no readable report' -and $V.Found -eq 'no GPO applied') ($V.Problems -join '; ')
+    Assert 'win32 message: a code, a hex HRESULT, zero' (((ConvertTo-ALWin32Message 2) -like 'The system cannot find the file specified*') -and ((ConvertTo-ALWin32Message '0x8007007E') -like 'The specified module could not be found*') -and ((ConvertTo-ALWin32Message 0) -eq 'The operation completed successfully')) ((ConvertTo-ALWin32Message 2) + ' / ' + (ConvertTo-ALWin32Message '0x8007007E'))
+    Assert 'win32 message: element not found, access denied' (((ConvertTo-ALWin32Message '1168') -like 'Element not found*') -and ((ConvertTo-ALWin32Message 5) -like 'Access is denied*'))
+    Assert 'win32 message: NTSTATUS named, other HRESULT and text passed through' (((ConvertTo-ALWin32Message '0xC0000034') -eq 'NTSTATUS 0xC0000034 STATUS_OBJECT_NAME_NOT_FOUND') -and ((ConvertTo-ALWin32Message '0xC0000999') -eq 'NTSTATUS 0xC0000999') -and ((ConvertTo-ALWin32Message 'n/a') -eq 'n/a') -and ((ConvertTo-ALWin32Message '0x80004005') -eq 'HRESULT 0x80004005 E_FAIL (Unspecified error)') -and ((ConvertTo-ALWin32Message '0x80091234') -eq 'HRESULT 0x80091234'))
+    $RawOk = [pscustomobject]@{ Computer = 'DC01'; Started = '2026-10-27T17:00:00'; Finished = '2026-10-27T17:00:30'; Gpupdate = @("gpupdate /target:computer /force - pass 1 of 2 at 17:00:00, exit code 0`r`nUpdating policy...`r`n`r`nComputer Policy update has completed successfully.", "gpupdate /target:computer /force - pass 2 of 2 at 17:00:12, exit code 0`r`nUpdating policy...`r`n`r`nComputer Policy update has completed successfully."); GpupdateExit = @(0, 0); GpresultText = $GpText; GpresultTextExit = 0; GpresultXml = (& $Rsop 'false' 'false' 0); GpresultXmlExit = 0; AppIdSvc = 'Running/Auto'; Effective = 'Exe=Enabled(10)'; EffectiveXml = ''; PolicyEvents = @([pscustomobject]@{ Time = '2026-10-26 11:36:20'; Id = 8001; Status = ''; Message = 'The AppLocker policy was applied successfully to this computer.' }) }
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC01' $RawOk $Rep 'Enforce' 'A' 'E' 'C:\x\DC01-gpresult.txt'
+    Assert 'gp rows: Enforce as expected -> OK applied, OK processing, OK events, INFO group policy' ((($Rows | ForEach-Object { "$($_.Status) $($_.Check)" }) -join '|') -eq 'OK GPO applied DC01|OK GPO processing DC01|OK AppLocker policy events DC01|INFO Group Policy DC01') (($Rows | ForEach-Object { "$($_.Status) $($_.Check)" }) -join '|')
+    Assert 'gp rows: the applied row names what is and is not applied' ($Rows[0].Detail -like 'applied: Default Domain Controllers Policy, E, Default Domain Policy; not applied: A (Disabled (Link)) - as expected for Enforce*') $Rows[0].Detail
+    Assert 'gp rows: the group policy row carries the raw file and the last-applied time' ($Rows[3].Detail -like 'last applied 10/27/2026 at 2:01:37 PM from DC25-1.skynet-home.local; raw gpupdate / gpresult output: C:\x\DC01-gpresult.txt')
+    $RawNoEvents = [pscustomobject]@{ Computer = 'DC22-2'; Started = ''; Finished = ''; Gpupdate = @(); GpupdateExit = @(); GpresultText = ''; GpresultTextExit = 0; GpresultXml = (& $Rsop 'true' 'true' 0); GpresultXmlExit = 0; AppIdSvc = 'Running/Auto'; Effective = 'Appx=AuditOnly(1), Dll=NotConfigured(0), Exe=AuditOnly(10)'; EffectiveXml = ''; PolicyEvents = @() }
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC22-2' $RawNoEvents (ConvertFrom-ALGpResult $RawNoEvents.GpresultXml '') 'Audit' 'A' 'E' 'f'
+    Assert 'gp rows: no policy event yet but the policy is effective -> INFO that says so (Server 2022 logs 8001 late)' ($Rows[2].Status -eq 'INFO' -and $Rows[2].Detail -like 'none in the EXE and DLL log yet - the effective policy is loaded (Appx=AuditOnly(1)*minute or two*') $Rows[2].Detail
+    $RawNoEvents.Effective = 'empty (no rule collection)'
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC22-2' $RawNoEvents (ConvertFrom-ALGpResult $RawNoEvents.GpresultXml '') 'Audit' 'A' 'E' 'f'
+    Assert 'gp rows: no policy event and no effective policy -> INFO nothing applied yet' ($Rows[2].Detail -like 'none in the EXE and DLL log: no AppLocker policy has been applied or rejected*')
+    $Raw8000 = [pscustomobject]@{ Computer = 'DC22-2'; Started = ''; Finished = ''; Gpupdate = @(); GpupdateExit = @(); GpresultText = ''; GpresultTextExit = 0; GpresultXml = (& $Rsop 'true' 'true' 5); GpresultXmlExit = 0; AppIdSvc = 'Running/Auto'; Effective = 'empty (no rule collection)'; EffectiveXml = ''; PolicyEvents = @([pscustomobject]@{ Time = '2026-10-27 10:00:00'; Id = 8000; Status = '2'; Message = '' }, [pscustomobject]@{ Time = '2026-10-27 09:00:00'; Id = 8001; Status = ''; Message = 'applied' }) }
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC22-2' $Raw8000 (ConvertFrom-ALGpResult $Raw8000.GpresultXml '') 'Audit' 'A' 'E' 'C:\x\DC22-2-gpresult.txt'
+    Assert 'gp rows: a failed Security extension is a FAIL, a newest 8000 is a WARN with the decoded status' ((($Rows | ForEach-Object { "$($_.Status) $($_.Check)" }) -join '|') -eq 'OK GPO applied DC22-2|FAIL GPO processing DC22-2|WARN AppLocker policy events DC22-2|INFO Group Policy DC22-2') (($Rows | ForEach-Object { "$($_.Status) $($_.Check)" }) -join '|')
+    Assert 'gp rows: the processing row decodes the error, the events row the status' ($Rows[1].Detail -like '*Security extension error 5 (Access is denied*' -and $Rows[2].Detail -like 'newest is 8000 at 2026-10-27 10:00:00: AppID policy conversion failed, status 2 (The system cannot find the file specified*7_AL_diagnose.ps1*') "$($Rows[1].Detail) / $($Rows[2].Detail)"
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC22-2' $Raw8000 (ConvertFrom-ALGpResult $Raw8000.GpresultXml '') 'Any' 'A' 'E' 'f'
+    Assert 'gp rows: mode Any only reports' ($Rows[0].Status -eq 'INFO' -and $Rows[0].Detail -like 'applied: A, Default Domain Controllers Policy, Default Domain Policy; not applied: E (Denied (Security))*' -and $Rows[1].Status -eq 'FAIL') "$($Rows[0].Detail)"
+    $Rows = New-ALResults
+    Add-ALGpResults $Rows 'DC22-2' $Raw8000 (ConvertFrom-ALGpResult $Raw8000.GpresultXml '') 'Off' 'A' 'E' 'f'
+    Assert 'gp rows: mode Off - an applied AppLocker GPO is a FAIL, an extension error only a WARN' ($Rows[0].Status -eq 'FAIL' -and $Rows[1].Status -eq 'WARN')
+    $GpDir = Join-Path $Tmp 'gp'
+    $GpFile = Save-ALGpResult $RawOk $GpDir
+    $GpSaved = [IO.File]::ReadAllText($GpFile)
+    $GpXmlBytes = [IO.File]::ReadAllBytes((Join-Path $GpDir 'DC01-gpresult.xml'))
+    Assert 'gp raw file: text holds the service, the policy, the events, both gpupdate passes and the gpresult report, CRLF' ($GpFile -eq (Join-Path $GpDir 'DC01-gpresult.txt') -and $GpSaved.Contains('Application Identity (AppIDSvc): Running/Auto') -and $GpSaved.Contains('event 8001: The AppLocker policy was applied successfully') -and ([regex]::Matches($GpSaved, 'Computer Policy update has completed successfully').Count -eq 2) -and $GpSaved.Contains('Applied Group Policy Objects') -and -not ($GpSaved -replace "`r`n", '').Contains("`n"))
+    Assert 'gp raw file: the RSoP XML is written UTF-16 with BOM, as gpresult writes it' ($GpXmlBytes[0] -eq 0xFF -and $GpXmlBytes[1] -eq 0xFE -and ([IO.File]::ReadAllText((Join-Path $GpDir 'DC01-gpresult.xml'))).Contains('<ComputerResults>'))
+    Assert 'gp raw file: a server without an XML report gets only the text file' ((Save-ALGpResult ([pscustomobject]@{ Computer = 'DC02'; Started = ''; Finished = ''; Gpupdate = @(); GpupdateExit = @(); GpresultText = 'x'; GpresultTextExit = 1; GpresultXml = ''; GpresultXmlExit = 1; AppIdSvc = 'Stopped/Manual'; Effective = ''; EffectiveXml = ''; PolicyEvents = @() }) $GpDir) -eq (Join-Path $GpDir 'DC02-gpresult.txt') -and -not (Test-Path -LiteralPath (Join-Path $GpDir 'DC02-gpresult.xml')))
+
     if ($BuildFolder) {
         foreach ($M in 'Audit', 'Enforce') {
             $Src = Get-ChildItem -LiteralPath $BuildFolder -Filter "AppLockerRules-*-$M.xml" | Select-Object -First 1
