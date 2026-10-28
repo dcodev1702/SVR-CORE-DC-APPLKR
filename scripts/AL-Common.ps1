@@ -26,7 +26,8 @@
       - the toolkit: Import-ALModule, Test-ALModule (both PowerShell editions), Test-ALAccessChk, Get-ALPeMachine, Get-ALSha256
       - the policy conversion check (the rules as Application Identity converts them - one conditional ACE per rule, one ACL per
         collection, 64 KB each): ConvertTo-ALFqbnVersion, ConvertTo-ALConditionExpression, ConvertTo-ALRuleAce, Test-ALSddlNative,
-        Get-ALSddlSupport, Test-ALPolicyConvertible, Add-ALPolicyCheckResults, Get-ALStatusHint (what a Status of event 8000 points at)
+        Get-ALSddlSupport, Test-ALPolicyConvertible, Get-ALExceptionBreakdown (which folders make a rule big), Compress-ALRuleExceptions
+        (CollapseExceptionsUnder), Add-ALPolicyCheckResults, Get-ALStatusHint (what a Status of event 8000 points at)
       - the policy store on a server: $ALPolicyStoreProbe (the converter task, the permissions of the AppLocker folder and keys, the
         compiled <Collection>.AppLocker files, the collections delivered), Add-ALPolicyStoreResults
     Every function is documented where it is defined. The logic here is covered by tests\Test-AL.ps1 (no network, no domain).
@@ -83,6 +84,7 @@ function New-ALDefaultSettings {
         AccessChkSha256   = ''
         EnableDllRules    = $false
         EnableAppxRules   = $true
+        CollapseExceptionsUnder = @()
         EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 20; 'Packaged app-Execution' = 20; 'Packaged app-Deployment' = 20 }
     }
 }
@@ -143,6 +145,10 @@ function Assert-ALSettings($Cfg, [string]$SettingsFile) {
     foreach ($K in @($Cfg.KnownAdmins)) {
         if ("$K" -notmatch '^(S-1-\d+(-\d+)+|[^\\/:*?"<>|]+\\[^\\/:*?"<>|]+)$') { throw "STOP: KnownAdmins entry '$K' must be a SID (S-1-5-21-...) or DOMAIN\Group." }
         if (Test-ALNeverAdmin "$K") { throw "STOP: KnownAdmins entry '$K' is not an administrators group. Listing it would make every folder its members can write count as administrators-only and WIDEN the policy - remove it." }
+    }
+    foreach ($C in @($Cfg.CollapseExceptionsUnder)) {
+        if ("$C" -notmatch '^(%WINDIR%|%SYSTEM32%|%PROGRAMFILES%|%OSDRIVE%|[A-Za-z]:)\\[^\\*?"<>|][^*?"<>|]*\\\*$') { throw "STOP: CollapseExceptionsUnder entry '$C' must be a folder under %WINDIR%, %SYSTEM32%, %PROGRAMFILES%, %OSDRIVE% or a drive letter, ending in \* (for example %WINDIR%\SYSVOL\*)." }
+        if ("$C" -match '^%WINDIR%\\(SYSTEM32|SYSWOW64|WINSXS|MICROSOFT\.NET|SERVICING)\\\*$') { throw "STOP: CollapseExceptionsUnder entry '$C' would exclude a core Windows folder for every non-admin and non-elevated session - remove it." }
     }
     if ($Cfg.AccessChkSha256 -and $Cfg.AccessChkSha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'STOP: AccessChkSha256 must be a 64-character SHA-256 hex string (or empty).' }
     foreach ($N in @($Cfg.EventLogSizesMB.Keys)) {
@@ -660,6 +666,38 @@ function Add-ALPathExceptions([string]$XmlFile, [hashtable]$Exceptions) {
     return $Changed
 }
 
+# Collapses the exceptions of every allow rule under the given roots (%WINDIR%\SYSVOL\* ...) in an AppLocker policy file: the
+# exception paths inside a root are removed and the root itself becomes the one exception, so the rule only gets stricter - and
+# much smaller. AppLocker converts a rule collection into ONE access control list of at most 64 KB, one entry per rule, and the
+# %WINDIR%\* rule carries every user-writable folder as part of its entry; a DC's SYSVOL holds one such folder per GPO whose
+# creator or delegated editor is not an administrator - hundreds in a large domain. Returns one row per rule and root that changed
+# (Collection, Rule, Root, Removed); the file is written only when something changed.
+function Compress-ALRuleExceptions([string]$XmlFile, [string[]]$Roots) {
+    $Roots = @($Roots | Where-Object { $_ })
+    if (-not $Roots.Count) { return @() }
+    $Doc = New-Object System.Xml.XmlDocument
+    $Doc.Load($XmlFile)
+    $Rows = New-Object System.Collections.Generic.List[object]
+    foreach ($Rc in @($Doc.SelectNodes('/AppLockerPolicy/RuleCollection'))) {
+        foreach ($Rule in @($Rc.SelectNodes('*[@Action="Allow"]'))) {
+            $Ex = $Rule.SelectSingleNode('Exceptions')
+            if (-not $Ex) { continue }
+            foreach ($Root in $Roots) {
+                $Base = ConvertTo-ALComparablePath ($Root -replace '\\\*$', '')
+                $Under = @($Ex.SelectNodes('FilePathCondition') | Where-Object { $P = ConvertTo-ALComparablePath ($_.GetAttribute('Path') -replace '\\\*$', ''); $P -ne $Base -and $P.StartsWith($Base + '\', [StringComparison]::Ordinal) })
+                if (-not $Under.Count) { continue }
+                foreach ($U in $Under) { [void]$Ex.RemoveChild($U) }
+                if (-not @($Ex.SelectNodes('FilePathCondition') | Where-Object { (ConvertTo-ALComparablePath ($_.GetAttribute('Path') -replace '\\\*$', '')) -eq $Base }).Count) {
+                    $C = $Doc.CreateElement('FilePathCondition'); $C.SetAttribute('Path', $Root); [void]$Ex.AppendChild($C)
+                }
+                $Rows.Add([pscustomobject]@{ Collection = "$($Rc.GetAttribute('Type'))"; Rule = "$($Rule.GetAttribute('Name'))"; Root = $Root; Removed = $Under.Count })
+            }
+        }
+    }
+    if ($Rows.Count) { $Doc.Save($XmlFile) }
+    return $Rows.ToArray()
+}
+
 # The EXE allow rule for an ExtraAllowedPaths entry in a policy: $null when the policy has no such rule (the build left the entry out),
 # otherwise its exception paths (an empty array when it has none)
 function Get-ALRuleExceptions([xml]$Policy, [string]$Entry) {
@@ -730,15 +768,20 @@ function ConvertTo-ALAaronLockerPath([string]$Line, $Roots) {
 }
 
 # What a merged scan holds that an AaronLocker policy does not - empty is the proof that the rules were generated from the merged scan.
-# Every user-writable folder must be an exception path in the EXE collection, every deny-list entry a publisher exception there.
+# Every user-writable folder must be an exception path in the EXE collection (itself, or a parent folder's exception after
+# Compress-ALRuleExceptions), every deny-list entry a publisher exception there.
 function Get-ALMissingScanEntries([xml]$Policy, $Merge, $Roots) {
     $Paths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($C in @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]//Exceptions/FilePathCondition'))) { [void]$Paths.Add($C.GetAttribute('Path')) }
     $Pubs = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($C in @($Policy.SelectNodes('//RuleCollection[@Type="Exe"]//Exceptions/FilePublisherCondition'))) { [void]$Pubs.Add("$($C.GetAttribute('PublisherName'))|$($C.GetAttribute('ProductName'))|$($C.GetAttribute('BinaryName'))") }
+    $Parents = @($Paths | Where-Object { $_ -match '\\\*$' } | ForEach-Object { (ConvertTo-ALComparablePath ($_ -replace '\\\*$', '')) + '\' })
     foreach ($Line in @($Merge.Writable)) {
         $Want = ConvertTo-ALAaronLockerPath $Line $Roots
-        if (-not $Paths.Contains($Want)) { "user-writable folder $Line (expected exception $Want)" }
+        if ($Paths.Contains($Want)) { continue }
+        $W = ConvertTo-ALComparablePath ($Want -replace '\\\*$', '')
+        if (@($Parents | Where-Object { $W.StartsWith($_, [StringComparison]::Ordinal) }).Count) { continue }
+        "user-writable folder $Line (expected exception $Want)"
     }
     foreach ($D in @($Merge.Deny)) {
         if (-not $Pubs.Contains("$($D.PublisherName)|$($D.ProductName)|$($D.BinaryName)")) { "deny-list entry $($D.BinaryName) ($($D.ProductName))" }
@@ -776,7 +819,7 @@ function Get-ALPolicyMismatch([xml]$Policy, [string]$Mode, [bool]$DllRules, [boo
 # and measure the result against the limits. Where that parser is not available, or does not accept a form, the sizes are
 # estimated from the binary token layout of conditional expressions (MS-DTYP 2.4.4.17) and reported as estimates.
 $script:ALAclMaxBytes = 65535          # an ACL and an ACE each hold their size in a WORD
-$script:ALAclWarnPercent = 75          # WARN from this share of the limit
+$script:ALAclWarnPercent = 50          # WARN from this share: Windows' SDDL parser refused collections from 78% in a real build (2026-10-28)
 $script:ALAceFixedBytes = 8            # ACE header (4) + access mask (4); the SID and the condition follow
 $script:ALConverterExtraBytes = 40     # two plain ACEs the converter adds for app containers (seen in the Exe policy of Windows 10)
 $script:ALExistsWord = 'Exists'        # the keyword the SDDL parser of this computer accepts (Get-ALSddlSupport may lower it)
@@ -891,6 +934,37 @@ function ConvertTo-ALRuleAce([System.Xml.XmlElement]$Rule) {
     [pscustomobject]@{ Sddl = "($AceType;;0x1200a0;;;$Sid;($Expr))"; Bytes = $Bytes; Exceptions = $Ex.Count; Deny = ($AceType -eq 'XD'); Sid = $Sid; Problems = $Problems.ToArray() }
 }
 
+# Where the exceptions of a big rule come from: its path exceptions grouped by their first two segments (%WINDIR%\SYSVOL,
+# %SYSTEM32%\SPOOL, %WINDIR%\CCM ...) with count and estimated bytes, biggest group first, plus the publisher and hash exceptions.
+# Returns Groups (Path, Count, Bytes), Publisher, Hash and Text (one phrase for the reports).
+function Get-ALExceptionBreakdown([System.Xml.XmlElement]$Rule, [int]$Top = 4) {
+    $Groups = @{}
+    $Pub = 0; $PubBytes = [int64]0; $Hash = 0; $HashBytes = [int64]0
+    foreach ($X in @($Rule.SelectNodes('Exceptions/*'))) {
+        $E = ConvertTo-ALConditionExpression $X
+        switch ($X.LocalName) {
+            'FilePathCondition' {
+                $P = ("$($X.GetAttribute('Path'))" -replace ':\*$', '').ToUpperInvariant().TrimEnd('\', '*')
+                $Segs = @($P -split '\\' | Where-Object { $_ -ne '' })
+                $Key = if ($Segs.Count -ge 2) { ($Segs[0..1] -join '\') + '\*' } else { $P + '\*' }
+                if (-not $Groups.ContainsKey($Key)) { $Groups[$Key] = [pscustomobject]@{ Path = $Key; Count = 0; Bytes = [int64]0 } }
+                $Groups[$Key].Count++; $Groups[$Key].Bytes += $E.Bytes + 2
+            }
+            'FilePublisherCondition' { $Pub++; $PubBytes += $E.Bytes + 2 }
+            'FileHashCondition' { $Hash++; $HashBytes += $E.Bytes + 2 }
+        }
+    }
+    $Sorted = @($Groups.Values | Sort-Object Bytes -Descending)
+    $Parts = @($Sorted | Select-Object -First $Top | ForEach-Object { "$($_.Count) under $($_.Path) ($($_.Bytes.ToString('N0')) B)" })
+    if ($Sorted.Count -gt $Top) {
+        $Rest = @($Sorted | Select-Object -Skip $Top)
+        $Parts += "$(($Rest | Measure-Object Count -Sum).Sum) under $($Rest.Count) other folder(s) ($(([int64]($Rest | Measure-Object Bytes -Sum).Sum).ToString('N0')) B)"
+    }
+    if ($Pub) { $Parts += "$Pub publisher exception(s) ($($PubBytes.ToString('N0')) B)" }
+    if ($Hash) { $Parts += "$Hash hash exception(s) ($($HashBytes.ToString('N0')) B)" }
+    [pscustomobject]@{ Groups = $Sorted; Publisher = $Pub; Hash = $Hash; Text = $(if ($Parts.Count) { 'exceptions: ' + ($Parts -join ', ') } else { 'no exceptions' }) }
+}
+
 # Compiles an SDDL security descriptor string with Windows' own parser (ConvertStringSecurityDescriptorToSecurityDescriptor). Returns
 # Ok, Error (the Win32 code when it fails: 87 = the parameter is incorrect, 1336 = the ACL structure is invalid, 1337 = the SID is
 # invalid ...), Bytes (the binary security descriptor), Aces (the size in bytes of every ACE of its DACL) and DaclBytes. $null when
@@ -967,10 +1041,11 @@ function Get-ALSddlSupport {
 # in a GPO (4_AL_validate.ps1) or as it was delivered to a server (7_AL_diagnose.ps1): every rule's SID, action, condition and
 # exceptions; the conditional ACE of every rule and its size; the size of every collection's ACL - exact when Windows' SDDL parser
 # is available and accepts the rule's form, estimated otherwise - against the 65,535-byte limit of an ACL and of an ACE (FAIL at or
-# above it, WARN from ALAclWarnPercent). Returns Status (OK / WARN / FAIL), Native, Exact, Summary (one phrase per collection),
-# Largest (the biggest rule), Collections (Type, Mode, Rules, Deny, Exceptions, Bytes, Percent, Exact, Largest, LargestBytes,
-# Status) and Problems (Severity, Collection, Rule, Id, Problem).
-function Test-ALPolicyConvertible([xml]$Policy) {
+# above it, WARN from ALAclWarnPercent). -Ignore names the collections the settings switch off (Dll, Appx): reported as not
+# deployed, not judged. Returns Status (OK / WARN / FAIL), Native, Exact, Summary (one phrase per collection), Largest (the biggest
+# rule and where its exceptions come from), Collections (Type, Mode, Rules, Deny, Exceptions, Bytes, Percent, Exact, Largest,
+# LargestBytes, Status, Note, Breakdown) and Problems (Severity, Collection, Rule, Id, Problem).
+function Test-ALPolicyConvertible([xml]$Policy, [string[]]$Ignore = @()) {
     $Support = Get-ALSddlSupport
     $Max = $script:ALAclMaxBytes
     $Cols = New-Object System.Collections.Generic.List[object]
@@ -983,6 +1058,10 @@ function Test-ALPolicyConvertible([xml]$Policy) {
         if ($Mode -eq '') { $Mode = 'NotConfigured' }
         if ($Type -notin 'Exe', 'Dll', 'Script', 'Msi', 'Appx', 'ManagedInstaller') { Add-Problem 'FAIL' $Type '' '' "unknown rule collection type '$Type'" }
         $Rules = @($Rc.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' })
+        if ($Type -in @($Ignore)) {
+            $Cols.Add([pscustomobject]@{ Type = $Type; Mode = $Mode; Rules = $Rules.Count; Deny = 0; Exceptions = 0; Bytes = [int64]0; Percent = 0; Exact = $true; Largest = ''; LargestBytes = [int64]0; Status = 'OK'; Note = 'not deployed (switched off in the settings)'; Breakdown = '' })
+            continue
+        }
         $Aces = New-Object System.Collections.Generic.List[object]
         $Deny = 0; $Exceptions = 0; $Exact = $true; $Broken = $false
         foreach ($Rule in $Rules) {
@@ -1004,10 +1083,10 @@ function Test-ALPolicyConvertible([xml]$Policy) {
             }
             if (-not $IsExact) { $Exact = $false }
             # The estimate decides too: it follows the binary layout, so a rule it puts beyond the limit is beyond it
-            if ($Bytes -gt $Max -or $EstBytes -gt $Max) { $Shown = [math]::Max($Bytes, $EstBytes); Add-Problem 'FAIL' $Type $Name $Id "this rule alone compiles to $($Shown.ToString('N0')) bytes, more than one ACE can hold ($($Max.ToString('N0'))); it has $($Ace.Exceptions) exception(s)$(if (-not $IsExact -or $EstBytes -gt $Bytes) { ' (estimated)' })"; $Broken = $true }
+            if ($Bytes -gt $Max -or $EstBytes -gt $Max) { $Shown = [math]::Max($Bytes, $EstBytes); Add-Problem 'FAIL' $Type $Name $Id "this rule alone compiles to $($Shown.ToString('N0')) bytes, more than one ACE can hold ($($Max.ToString('N0'))); it has $($Ace.Exceptions) exception(s)$(if (-not $IsExact -or $EstBytes -gt $Bytes) { ' (estimated)' }); $((Get-ALExceptionBreakdown $Rule).Text) - collapse them with CollapseExceptionsUnder or list their writers in KnownAdmins (README, step 4)"; $Broken = $true }
             if ($Ace.Deny) { $Deny++ }
             $Exceptions += $Ace.Exceptions
-            $Aces.Add([pscustomobject]@{ Name = $Name; Id = $Id; Bytes = $Bytes; Est = $EstBytes; Exact = $IsExact; Sddl = $Ace.Sddl; Deny = $Ace.Deny })
+            $Aces.Add([pscustomobject]@{ Name = $Name; Id = $Id; Bytes = $Bytes; Est = $EstBytes; Exact = $IsExact; Sddl = $Ace.Sddl; Deny = $Ace.Deny; Node = $Rule })
         }
         [int64]$Total = 0; [int64]$EstTotal = 0
         if ($Rules.Count) {
@@ -1019,16 +1098,30 @@ function Test-ALPolicyConvertible([xml]$Policy) {
                 $All = 'D:' + ((@($Aces | Where-Object { $_.Deny }) + @($Aces | Where-Object { -not $_.Deny }) | ForEach-Object { $_.Sddl }) -join '')
                 $N = Test-ALSddlNative $All
                 if ($N -and $N.Ok) { $Total = [int64]$N.DaclBytes + $script:ALConverterExtraBytes }
-                elseif ($N -and -not $N.Ok) { Add-Problem 'FAIL' $Type '' '' "the $Type collection does not compile as one ACL although every rule does on its own (error $($N.Error): $(ConvertTo-ALWin32Message $N.Error)) - $($Rules.Count) rules, about $($Total.ToString('N0')) bytes"; $Broken = $true }
+                elseif ($N -and -not $N.Ok) {
+                    # Which rule tips it over: the longest run of rules (deny first, as ordered above) the parser still accepts
+                    $Ordered = @(@($Aces | Where-Object { $_.Deny }) + @($Aces | Where-Object { -not $_.Deny }))
+                    $Lo = 0; $Hi = $Ordered.Count - 1
+                    while ($Lo -lt $Hi) {
+                        $Mid = [int][math]::Ceiling(($Lo + $Hi) / 2)
+                        $Try = Test-ALSddlNative ('D:' + ((@($Ordered | Select-Object -First $Mid) | ForEach-Object { $_.Sddl }) -join ''))
+                        if ($Try -and $Try.Ok) { $Lo = $Mid } else { $Hi = $Mid - 1 }
+                    }
+                    [int64]$Fits = 0; foreach ($A in @($Ordered | Select-Object -First $Lo)) { $Fits += $A.Bytes }
+                    $Next = $Ordered[$Lo]
+                    Add-Problem 'FAIL' $Type '' '' "the $Type collection does not compile as one ACL although every rule does on its own (error $($N.Error): $(ConvertTo-ALWin32Message $N.Error)): $($Rules.Count) rules, $($Total.ToString('N0')) bytes in all, $($All.Length.ToString('N0')) characters of SDDL. The parser accepts the first $Lo rule(s) ($($Fits.ToString('N0')) B) and refuses them with '$($Next.Name)' ($($Next.Bytes.ToString('N0')) B) added$(if (@($Next.Node.SelectNodes('Exceptions/*')).Count) { '; ' + (Get-ALExceptionBreakdown $Next.Node).Text + ' - collapse them with CollapseExceptionsUnder or list their writers in KnownAdmins (README, step 4)' })"
+                    $Broken = $true
+                }
             }
         }
-        $Largest = $null
-        if ($Aces.Count) { $Largest = @($Aces | Sort-Object Bytes -Descending)[0] }
+        $Largest = $null; $BreakText = ''
+        if ($Aces.Count) { $Largest = @($Aces | Sort-Object Bytes -Descending)[0]; if (@($Largest.Node.SelectNodes('Exceptions/*')).Count) { $BreakText = (Get-ALExceptionBreakdown $Largest.Node).Text } }
         $Pct = if ($Rules.Count) { [math]::Round(100.0 * $Total / $Max, 1) } else { 0 }
         $Status = 'OK'
-        if ($Rules.Count -and ($Total -gt $Max -or $EstTotal -gt $Max)) { $Shown = [math]::Max($Total, $EstTotal); if ($Shown -gt $Total) { $Total = $Shown }; Add-Problem 'FAIL' $Type '' '' "the $Type collection compiles to $($Shown.ToString('N0')) bytes, more than one ACL can hold ($($Max.ToString('N0'))): $($Rules.Count) rules, the largest '$($Largest.Name)' with $($Largest.Bytes.ToString('N0')) bytes$(if (-not $Exact -or $EstTotal -gt $Total) { ' (estimated)' })" }
-        elseif ($Rules.Count -and $Pct -ge $script:ALAclWarnPercent) { Add-Problem 'WARN' $Type '' '' "the $Type collection uses $Pct% of the 64 KB an ACL can hold ($($Total.ToString('N0')) bytes, $($Rules.Count) rules): add rules sparingly" }
-        $Cols.Add([pscustomobject]@{ Type = $Type; Mode = $Mode; Rules = $Rules.Count; Deny = $Deny; Exceptions = $Exceptions; Bytes = $Total; Percent = $Pct; Exact = ($Exact -and $Rules.Count -gt 0); Largest = $(if ($Largest) { $Largest.Name } else { '' }); LargestBytes = $(if ($Largest) { $Largest.Bytes } else { 0 }); Status = $Status })
+        $Advice = $(if ($BreakText) { "; $BreakText - collapse them with CollapseExceptionsUnder or list their writers in KnownAdmins (README, step 4)" } else { '' })
+        if ($Rules.Count -and ($Total -gt $Max -or $EstTotal -gt $Max)) { $Shown = [math]::Max($Total, $EstTotal); if ($Shown -gt $Total) { $Total = $Shown }; Add-Problem 'FAIL' $Type '' '' "the $Type collection compiles to $($Shown.ToString('N0')) bytes, more than one ACL can hold ($($Max.ToString('N0'))): $($Rules.Count) rules, the largest '$($Largest.Name)' with $($Largest.Bytes.ToString('N0')) bytes$(if (-not $Exact -or $EstTotal -gt $Total) { ' (estimated)' })$Advice" }
+        elseif ($Rules.Count -and $Pct -ge $script:ALAclWarnPercent) { Add-Problem 'WARN' $Type '' '' "the $Type collection uses $Pct% of the 64 KB an ACL can hold ($($Total.ToString('N0')) bytes, $($Rules.Count) rules); Windows' SDDL parser refused collections from 78% in a real build, so keep every collection under half: the largest rule is '$($Largest.Name)' with $($Largest.Bytes.ToString('N0')) bytes$Advice" }
+        $Cols.Add([pscustomobject]@{ Type = $Type; Mode = $Mode; Rules = $Rules.Count; Deny = $Deny; Exceptions = $Exceptions; Bytes = $Total; Percent = $Pct; Exact = ($Exact -and $Rules.Count -gt 0); Largest = $(if ($Largest) { $Largest.Name } else { '' }); LargestBytes = $(if ($Largest) { $Largest.Bytes } else { 0 }); Status = $Status; Note = ''; Breakdown = $BreakText })
     }
     foreach ($C in $Cols) {
         $Own = @($Problems | Where-Object { $_.Collection -eq $C.Type })
@@ -1036,13 +1129,13 @@ function Test-ALPolicyConvertible([xml]$Policy) {
     }
     $Overall = 'OK'
     if (@($Problems | Where-Object { $_.Severity -eq 'FAIL' }).Count) { $Overall = 'FAIL' } elseif (@($Problems | Where-Object { $_.Severity -eq 'WARN' }).Count) { $Overall = 'WARN' }
-    $Big = @($Cols | Where-Object { $_.Rules -gt 0 } | Sort-Object LargestBytes -Descending) | Select-Object -First 1
+    $Big = @($Cols | Where-Object { $_.Rules -gt 0 -and -not $_.Note } | Sort-Object LargestBytes -Descending) | Select-Object -First 1
     [pscustomobject]@{
         Status      = $Overall
         Native      = $Support.Native
         Exact       = (@($Cols | Where-Object { $_.Rules -gt 0 -and -not $_.Exact }).Count -eq 0)
-        Summary     = (@($Cols | Sort-Object Type | ForEach-Object { "$($_.Type)=$($_.Mode) $($_.Rules) rule(s), $($_.Bytes.ToString('N0')) B ($($_.Percent)% of 64 KB$(if ($_.Rules -gt 0 -and -not $_.Exact) { ', estimated' }))" }) -join '; ')
-        Largest     = $(if ($Big) { "largest rule: $($Big.Type) '$($Big.Largest)' $($Big.LargestBytes.ToString('N0')) B" } else { 'no rules' })
+        Summary     = (@($Cols | Sort-Object Type | ForEach-Object { "$($_.Type)=$($_.Mode) $($_.Rules) rule(s), $(if ($_.Note) { $_.Note } else { "$($_.Bytes.ToString('N0')) B ($($_.Percent)% of 64 KB$(if ($_.Rules -gt 0 -and -not $_.Exact) { ', estimated' }))" })" }) -join '; ')
+        Largest     = $(if ($Big) { "largest rule: $($Big.Type) '$($Big.Largest)' $($Big.LargestBytes.ToString('N0')) B$(if ($Big.Breakdown) { " ($($Big.Breakdown))" })" } else { 'no rules' })
         Collections = $Cols.ToArray()
         Problems    = $Problems.ToArray()
     }

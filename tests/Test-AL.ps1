@@ -8,8 +8,8 @@
     the PE machine check, the writable-permission check on crafted ACLs, path comparison helpers, the deploy XML conversion, rule
     exceptions, the KnownAdmins helpers (canonical names, LDAP escaping, who counts, who never counts, entry format), the in-place
     settings write, and the policy conversion check (the conditional ACE of every rule form, the size estimate, the 64 KB ACL / ACE
-    limits, the result rows, the status hint, the policy store rows; on Windows also Windows' own SDDL parser and the store probe on
-    this computer). Every test creates what it needs under a temporary folder that is deleted at the end. With -BuildFolder it also
+    limits, the result rows, the status hint, the policy store rows, the exception breakdown, CollapseExceptionsUnder; on Windows
+    also Windows' own SDDL parser and the store probe on this computer). Every test creates what it needs under a temporary folder that is deleted at the end. With -BuildFolder it also
     compares New-ALDeployXml against a real build and checks that adding exceptions to it changes only the C:\Admin rules.
 
 .PARAMETER BuildFolder
@@ -34,7 +34,7 @@
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
     Date     : 2026-10-28
-    Version  : 1.1 (the policy conversion check and the policy store rows)
+    Version  : 1.2 (exception breakdown, CollapseExceptionsUnder; 1.1: the policy conversion check and the policy store rows)
     Requires : Windows PowerShell 5.1 or PowerShell 7. No modules, no elevation, no domain.
     Changes  : nothing outside a temporary folder under %TEMP% (created and deleted by the run).
 #>
@@ -536,8 +536,8 @@ USER SETTINGS
     $Huge = Test-ALPolicyConvertible (& $PolicyOf ('<FilePathRule Id="4a6c2f3e-0000-4000-8000-000000000010" Name="huge" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions><Exceptions>' + $ManyEx + '</Exceptions></FilePathRule>'))
     Assert 'policy check: one rule with 1,200 exceptions is more than an ACE can hold -> FAIL for the rule and for the collection' ($Huge.Status -eq 'FAIL' -and @($Huge.Problems | Where-Object { $_.Severity -eq 'FAIL' -and $_.Rule -eq 'huge' -and $_.Problem -like 'this rule alone compiles to * bytes, more than one ACE can hold*1200 exception(s)*' }).Count -eq 1 -and @($Huge.Problems | Where-Object { $_.Collection -eq 'Exe' -and $_.Rule -eq '' -and $_.Problem -like 'the Exe collection compiles to * bytes, more than one ACL can hold*' }).Count -eq 1 -and $Huge.Collections[0].Status -eq 'FAIL') (($Huge.Problems | ForEach-Object { $_.Problem }) -join ' | ')
     $HashRules = { param([int]$N) -join @(1..$N | ForEach-Object { '<FileHashRule Id="' + [guid]::NewGuid().ToString() + '" Name="hash ' + $_ + '" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FileHashCondition><FileHash Type="SHA256" Data="0x' + $_.ToString('X').PadLeft(64, '0') + '" SourceFileName="f' + $_ + '.exe" SourceFileLength="1" /></FileHashCondition></Conditions></FileHashRule>' }) }
-    $Warn = Test-ALPolicyConvertible (& $PolicyOf (& $HashRules 375))
-    Assert 'policy check: 375 hash rules use more than 75% of an ACL -> WARN' ($Warn.Status -eq 'WARN' -and $Warn.Collections[0].Percent -ge 75 -and $Warn.Collections[0].Percent -lt 100 -and @($Warn.Problems | Where-Object { $_.Severity -eq 'WARN' -and $_.Problem -like 'the Exe collection uses *% of the 64 KB*' }).Count -eq 1) $Warn.Summary
+    $Warn = Test-ALPolicyConvertible (& $PolicyOf (& $HashRules 240))
+    Assert 'policy check: 240 hash rules use more than half of an ACL -> WARN (or FAIL when the parser of this computer already refuses the whole)' ((($Warn.Status -eq 'WARN') -or ($Warn.Status -eq 'FAIL' -and @($Warn.Problems | Where-Object { $_.Problem -like '*does not compile as one ACL*' }).Count -eq 1)) -and $Warn.Collections[0].Percent -ge 50 -and $Warn.Collections[0].Percent -lt 100 -and @($Warn.Problems | Where-Object { $_.Severity -eq 'WARN' -and $_.Problem -like 'the Exe collection uses *% of the 64 KB*keep every collection under half*' }).Count -eq 1) "$($Warn.Summary); $(($Warn.Problems | ForEach-Object { $_.Problem }) -join ' | ')"
     $Over = Test-ALPolicyConvertible (& $PolicyOf (& $HashRules 560))
     Assert 'policy check: 560 hash rules are more than an ACL can hold -> FAIL for the collection, no rule failing on its own' ($Over.Status -eq 'FAIL' -and $Over.Collections[0].Bytes -gt 65535 -and @($Over.Problems | Where-Object { $_.Severity -eq 'FAIL' -and $_.Rule -eq '' -and $_.Problem -like 'the Exe collection compiles to*' }).Count -eq 1 -and @($Over.Problems | Where-Object { $_.Rule -ne '' -and $_.Severity -eq 'FAIL' }).Count -eq 0) "$($Over.Summary); $(($Over.Problems | ForEach-Object { $_.Problem }) -join ' | ')"
     $Dup = Test-ALPolicyConvertible (& $PolicyOf ($AdminRuleXml + $AdminRuleXml))
@@ -564,6 +564,32 @@ USER SETTINGS
     $NoTask = & $StoreOf $true $true '' @(); $NoTask.Task = $null; $NoTask.TaskError = 'No MSFT_ScheduledTask objects found'
     $Rows = New-ALResults; Add-ALPolicyStoreResults $Rows 'DC22-2' $NoTask
     Assert 'store rows: a missing converter task is a FAIL while rules are delivered; no compiled file without an 8000 is a WARN' (@($Rows | Where-Object { $_.Check -eq 'Policy converter DC22-2' -and $_.Status -eq 'FAIL' -and $_.Detail -like '*was not found (No MSFT_ScheduledTask objects found)*' }).Count -eq 1 -and @($Rows | Where-Object { $_.Check -eq 'Compiled policy DC22-2' -and $_.Status -eq 'WARN' }).Count -eq 1) (($Rows | ForEach-Object { "$($_.Status) $($_.Check): $($_.Detail)" }) -join ' // ')
+    # ---- which folders make a rule big; CollapseExceptionsUnder; the merged-scan proof with a collapsed parent; switched-off collections
+    $SysvolEx = -join @(1..3 | ForEach-Object { "<FilePathCondition Path=`"%WINDIR%\sysvol\domain\policies\{guid-$_}\machine\*`" />" })
+    $BigRuleXml = '<FilePathRule Id="4a6c2f3e-0000-4000-8000-000000000020" Name="win2" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions><Exceptions>' + $SysvolEx + '<FilePathCondition Path="%WINDIR%\sysvol:*" /><FilePathCondition Path="%SYSTEM32%\spool\drivers\color\*" /><FilePathCondition Path="%WINDIR%\temp\*" /><FilePublisherCondition PublisherName="' + $MsPub + '" ProductName="*" BinaryName="CIPHER.EXE"><BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition></Exceptions></FilePathRule>'
+    $Bd = Get-ALExceptionBreakdown (& $RuleOf $BigRuleXml)
+    Assert 'breakdown: path exceptions grouped by their first two segments (the ADS entry with its folder), biggest first; publisher exceptions counted' ($Bd.Groups[0].Path -eq '%WINDIR%\SYSVOL\*' -and $Bd.Groups[0].Count -eq 4 -and $Bd.Groups.Count -eq 3 -and $Bd.Publisher -eq 1 -and $Bd.Hash -eq 0 -and $Bd.Text -like 'exceptions: 4 under %WINDIR%\SYSVOL\* (* B), 1 under %SYSTEM32%\SPOOL\* (* B), 1 under %WINDIR%\TEMP\* (* B), 1 publisher exception(s) (* B)') $Bd.Text
+    Assert 'breakdown: a rule without exceptions' ((Get-ALExceptionBreakdown (& $RuleOf $AdminRuleXml)).Text -eq 'no exceptions')
+    $ChkBig = Test-ALPolicyConvertible (& $PolicyOf ($BigRuleXml + $AdminRuleXml))
+    Assert 'policy check: the largest rule comes with its breakdown' ($ChkBig.Largest -like "largest rule: Exe 'win2' * B (exceptions: 4 under %WINDIR%\SYSVOL\* *)" -and $ChkBig.Collections[0].Breakdown -like 'exceptions: 4 under*') $ChkBig.Largest
+    $Col = Join-Path $Tmp 'collapse.xml'
+    Set-Content -LiteralPath $Col -Encoding Unicode -Value ('<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="Enabled">' + $BigRuleXml + $AdminRuleXml + '</RuleCollection><RuleCollection Type="Script" EnforcementMode="Enabled">' + ($BigRuleXml -replace '000000000020', '000000000021') + '</RuleCollection></AppLockerPolicy>')
+    $CRows = @(Compress-ALRuleExceptions $Col @('%WINDIR%\SYSVOL\*', '%WINDIR%\CCM\*'))
+    $ColDoc = New-Object System.Xml.XmlDocument; $ColDoc.Load($Col)
+    $ExeEx = @($ColDoc.SelectNodes('//RuleCollection[@Type="Exe"]/FilePathRule[@Name="win2"]/Exceptions/*') | ForEach-Object { if ($_.LocalName -eq 'FilePathCondition') { $_.GetAttribute('Path') } else { 'PUB' } })
+    Assert 'collapse: the SYSVOL exceptions of both rules become one root each; the ADS entry, the other folders and the publisher exception stay; an unused root changes nothing' ($CRows.Count -eq 2 -and @($CRows | Where-Object { $_.Root -eq '%WINDIR%\SYSVOL\*' -and $_.Removed -eq 3 }).Count -eq 2 -and @($CRows | Where-Object { $_.Collection -eq 'Script' -and $_.Rule -eq 'win2' }).Count -eq 1 -and (($ExeEx | Sort-Object) -join '|') -eq ((@('%SYSTEM32%\spool\drivers\color\*', '%WINDIR%\SYSVOL\*', '%WINDIR%\sysvol:*', '%WINDIR%\temp\*', 'PUB') | Sort-Object) -join '|')) ((($CRows | ForEach-Object { "$($_.Collection) $($_.Rule) $($_.Root) $($_.Removed)" }) -join '; ') + ' / ' + ($ExeEx -join '|'))
+    $CRows2 = @(Compress-ALRuleExceptions $Col @('%WINDIR%\SYSVOL\*'))
+    $ColDoc2 = New-Object System.Xml.XmlDocument; $ColDoc2.Load($Col)
+    Assert 'collapse: idempotent - a second run removes nothing and adds no second root' ($CRows2.Count -eq 0 -and @($ColDoc2.SelectNodes('//Exceptions/FilePathCondition[@Path="%WINDIR%\SYSVOL\*"]')).Count -eq 2)
+    Assert 'collapse: no roots -> nothing' (@(Compress-ALRuleExceptions $Col @()).Count -eq 0)
+    foreach ($V in '%WINDIR%\SYSVOL\*', '%WINDIR%\CCM\*', '%SYSTEM32%\spool\*', 'C:\Foo\Bar\*') { Assert "settings: CollapseExceptionsUnder '$V' accepted" (-not (Throws { Assert-ALSettings (With @{ CollapseExceptionsUnder = @($V) }) 'x' } '*')) }
+    foreach ($V in '%WINDIR%\*', '%SYSTEM32%\*', '%WINDIR%\SYSVOL', 'sysvol\*', '%WINDIR%\System32\*', '%WINDIR%\SysWOW64\*', 'C:\*') { Assert "settings: CollapseExceptionsUnder '$V' refused" (Throws { Assert-ALSettings (With @{ CollapseExceptionsUnder = @($V) }) 'x' }) }
+    $MergeCollapsed = [pscustomobject]@{ Writable = @('C:\Windows\SYSVOL\domain\Policies\{guid-1}\Machine\*', 'C:\Windows\Temp\*'); Deny = @() }
+    $PolParent = [xml]'<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="Enabled"><FilePathRule Id="1" Name="w" Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition Path="%WINDIR%\*" /></Conditions><Exceptions><FilePathCondition Path="%WINDIR%\SYSVOL\*" /></Exceptions></FilePathRule></RuleCollection></AppLockerPolicy>'
+    $MissC = @(Get-ALMissingScanEntries $PolParent $MergeCollapsed $Roots)
+    Assert 'missing entries: a collapsed parent exception covers the folders under it; the rest is still reported' ($MissC.Count -eq 1 -and $MissC[0] -like 'user-writable folder C:\Windows\Temp\*(expected exception %WINDIR%\Temp\*)') ($MissC -join '; ')
+    $Ign = Test-ALPolicyConvertible (& $PolicyOf $AdminRuleXml ('<RuleCollection Type="Dll" EnforcementMode="AuditOnly">' + (& $HashRules 600) + '</RuleCollection>')) -Ignore @('Dll')
+    Assert 'policy check: a collection the settings switch off is reported as not deployed and not judged' ($Ign.Status -eq 'OK' -and $Ign.Summary -like 'Dll=AuditOnly 600 rule(s), not deployed*; Exe=Enabled 1 rule(s), * B (*' -and @($Ign.Collections | Where-Object { $_.Type -eq 'Dll' })[0].Note -ne '' -and $Ign.Largest -like "largest rule: Exe '*") $Ign.Summary
     if ($IsWin) {
         $Sup = Get-ALSddlSupport
         Assert 'sddl native: the Windows parser is available and compiles the path form' ($Sup.Native -and $Sup.Path) "$($Sup | ConvertTo-Json -Compress)"
