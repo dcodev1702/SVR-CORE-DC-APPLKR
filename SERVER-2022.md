@@ -6,7 +6,7 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 > **The steps in the README are the same on Server 2022:** same AppLocker, same policy format, same two GPOs, same scripts. Three things differ, and the scripts handle each one:
 > 1. **The reference DC.** The policy is built from what the build finds on a DC's disk, so the build must scan every Windows Server version it protects. With DCs of both versions, list one DC of the other version in `ExtraReferenceServers`: the build scans it too and merges the scans. Pre-flight warns when a DC runs a version that no reference DC runs ([section 2](#2-cover-every-windows-server-version-in-the-build)).
 > 2. **PowerShell 2.0.** It can still be installed on Server 2022, and it doesn't apply the Constrained Language Mode that AppLocker's script rules rely on. Pre-flight warns when it's installed. Remove it ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
-> 3. **The STIG IDs.** The Server 2022 item is **WN22-00-000080 / V-254245**. `6_AL_stig_check.ps1` reports each DC under the item for its version ([section 4](#4-the-server-2022-stig-ids)).
+> 3. **The STIG IDs.** The Server 2022 item is **WN22-00-000080 / V-254245**. `6_AL_stig_check.ps1` reports each DC under the item for its version ([section 4](#4-the-server-2022-stig-ids)). Setting Audit, then Enforce, the STIG result after each, and the rollback to Audit: [section 4](#audit-then-enforce-the-stig-result-after-each-mode).
 >
 > **Where to run it:** from a PAW joined to the DCs' domain, with nothing copied to the DCs (the default), or on a DC itself with the repository copied there from the PAW: [Before you start](#before-you-start-where-to-run-the-toolkit).
 >
@@ -20,6 +20,7 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 2. [Cover every Windows Server version in the build](#2-cover-every-windows-server-version-in-the-build)
 3. [Remove PowerShell 2.0 from the 2022 DCs](#3-remove-powershell-20-from-the-2022-dcs)
 4. [The Server 2022 STIG IDs](#4-the-server-2022-stig-ids)
+   - [Audit, then Enforce: the STIG result after each mode](#audit-then-enforce-the-stig-result-after-each-mode) - and how to roll back to Audit
 5. [What stays the same](#5-what-stays-the-same)
 6. [AppLocker on Server Core: Microsoft's support statement](#6-applocker-on-server-core-microsofts-support-statement)
 7. [AppLocker event 8000 on a Server Core 2022 DC: the policy is delivered but not applied](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)
@@ -109,6 +110,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\0_AL_get_toolkit.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\0_AL_pre-flight.ps1
 # ... and so on: 0_AL_secure_folders, 1_AL_build_policy, 2_AL_create_gpos, 3_AL_set_mode -Mode Audit -Refresh, 4_AL_validate
 ```
+
+Setting Audit and then Enforce, with the STIG result after each mode and the rollback to Audit: [section 4](#audit-then-enforce-the-stig-result-after-each-mode).
 
 | Where you run them | What to know |
 |---|---|
@@ -313,6 +316,61 @@ Invoke-Command -ComputerName dc22-01.contoso.com -ScriptBlock { Uninstall-Window
 
 Rule IDs (`SV-...`) change when DISA revises a rule, so match on the V-ID.
 
+### Audit, then Enforce: the STIG result after each mode
+
+README steps 6 to 9 on a Server 2022 DC, with what `6_AL_stig_check.ps1` reports after each mode. Run the commands in the PAW's `scripts` folder, or on the DC in `C:\SVR-CORE-DC-APPLKR\scripts` ([Before you start](#before-you-start-where-to-run-the-toolkit)). In a remote session (`Enter-PSSession`), add `-NoConfirm` to `3_AL_set_mode.ps1`: such a session cannot answer the Y/N prompt, so the script stops with *STOP: ... the session is non-interactive. Nothing was changed.*
+
+**1. Audit.** Enable the Audit link, refresh the DC, validate, check the STIG item:
+
+```powershell
+.\3_AL_set_mode.ps1 -Mode Audit -Refresh      # Audit link enabled, Enforce link disabled, gpupdate twice, gpresult judged
+.\4_AL_validate.ps1 -Mode Audit               # must end with: Validation: PASSED
+.\6_AL_stig_check.ps1
+```
+
+In Audit the STIG item is **Open**. The rules log what they would block and block nothing, so this is the expected result: Audit is a staging step, not compliance.
+
+![6_AL_stig_check.ps1 on DC22-2 in Audit: AppLocker GPO link JSLC_AppLocker_AUDIT_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status Open, Reason "EXE rules are AuditOnly - not enforced (Audit is a staging step, not compliance)"; Exe, Msi, Script and Appx AuditOnly, Dll NotConfigured, Application Identity Running / Auto; summary 0 NotAFinding, 1 Open/Not_Reviewed of 1 server(s)](images/SERVER-2022-STIG-Audit-Open.png)
+
+<sub>The lab's DC22-2 in Audit (2026-10-28): **WN22-00-000080 / V-254245: Open**.</sub>
+
+**2. The Audit period.** Leave Audit on and review what would have been blocked ([README, step 7](README.md#step-7--the-audit-period-and-review)):
+
+```powershell
+.\5_AL_review_events.ps1 -Days 14
+```
+
+Switch to Enforce only when the review shows nothing that the DC still needs. In the lab, DC22-2 had no would-be-blocked event (8003, 8006, 8021).
+
+**3. Enforce.** Enable the Enforce link, refresh the DC, validate, check the STIG item:
+
+```powershell
+.\3_AL_set_mode.ps1 -Mode Enforce -Refresh    # Enforce link enabled, Audit link disabled, gpupdate twice, gpresult judged
+.\4_AL_validate.ps1 -Mode Enforce             # must end with: Validation: PASSED
+.\6_AL_stig_check.ps1
+```
+
+In Enforce the STIG item is **NotAFinding**: the EXE rules are enforced, with allow rules, and Application Identity is running.
+
+![6_AL_stig_check.ps1 on DC22-2 in Enforce: AppLocker GPO link JSLC_AppLocker_ENFORCE_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status NotAFinding, Reason "AppLocker enforces a deny-by-default allowlist: EXE rules Enabled with allow rules, Application Identity running"; Exe, Msi, Script and Appx Enabled, Dll NotConfigured, Blocked24h 0; summary 1 NotAFinding, 0 Open/Not_Reviewed of 1 server(s)](images/SERVER-2022-STIG-Enforce-NotAFinding.png)
+
+<sub>The lab's DC22-2 in Enforce (2026-10-28): **WN22-00-000080 / V-254245: NotAFinding**.</sub>
+
+Then check that the DC works (`dcdiag`, SYSVOL and NETLOGON, logons, Group Policy) and watch for blocked events (8004, 8007) with `5_AL_review_events.ps1` for a few days, including a reboot and a patch cycle.
+
+> [!CAUTION]
+> **Roll back to Audit as soon as Enforce blocks something the DC needs.** Run the rollback in the PAW's `scripts` folder, or on the DC in `C:\SVR-CORE-DC-APPLKR\scripts`, in an **elevated** session:
+>
+> ```powershell
+> .\3_AL_set_mode.ps1 -Mode Audit -Refresh                # at a console: answer Y
+> .\3_AL_set_mode.ps1 -Mode Audit -Refresh -NoConfirm     # in a remote session (Enter-PSSession) or for automation
+> .\4_AL_validate.ps1 -Mode Audit                         # confirm: Audit link enabled, effective policy AuditOnly
+> ```
+>
+> - The script disables the Enforce link first, then enables the Audit link, and runs `gpupdate` twice. Once the DC has refreshed, nothing is blocked any more; what Enforce would block is logged as 8003 / 8006 instead. `-WhatIf` shows the two link changes without making them.
+> - Elevated administrators are always allowed, so Enforce cannot block the rollback itself. A **non-elevated** session cannot run the toolkit from `C:\SVR-CORE-DC-APPLKR`: in Enforce that folder is not an allowed path for non-admins. At the DC's console, `whoami /groups` must show *High Mandatory Level*. A remote session from the PAW is always elevated.
+> - The STIG item is **Open** again until you return to Enforce. To remove the AppLocker rules entirely, use `-Mode Off` ([README, section 13](README.md#13-rollback)).
+
 ---
 
 ## 5. What stays the same
@@ -405,7 +463,7 @@ Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps
 | **8000** | EXE and DLL | Must not appear. If it does, the rules are not loaded: this section |
 
 > [!NOTE]
-> **Lab status (2026-10-27/28).** A Server Core 2022 DC (`DC22-2`, Standard, the only DC of its own forest, promoted that day) had shown event 8000 in an earlier attempt made from a PAW. When the DC was reached for this diagnosis it had been reset: no AppLocker GPOs, empty AppLocker logs, every component present. The toolkit was then run on the DC itself (there was no management computer in that forest; [Before you start](#before-you-start-where-to-run-the-toolkit)), after the 2026-10 cumulative update (build 20348.4529 to 20348.5761): build, both GPOs, Audit with refresh, validate, diagnose. **Result: no event 8000.** The policy converted and applied - effective `Exe/Msi/Script/Appx = AuditOnly`, `GPO processing` Registry and Security OK, 8002/8005 events flowing - and the DC logged **8001 about 90 seconds after the refresh** (Server 2025 logs it within a second; the `AppLocker policy events` row says so when the policy is already effective and the event has not arrived yet). The earlier 8000 could therefore not be reproduced on a patched Server Core 2022; its status code was never captured. If it returns, `7_AL_diagnose.ps1` captures the status, and the causes above apply in that order. The *description cannot be found ... The handle is invalid* text seen in Event Viewer during that session came from a window that had stayed connected across two DC restarts (21:12 and 21:32 local time). After the DC's next restart, at 21:47, Event Viewer was opened again (21:59) and every event rendered: the screenshots under *Expected outcome*. The earlier report of *8000 ... AppLocker cannot be found* most likely combined a real 8000 with this display effect. Evidence: the `Outputs\<profile>\diag-<ts>\DC22-2.holonet.local\` folder and the `Logs\3_AL_set_mode-Audit-<ts>-gpresult\` reports of that run.
+> **Lab status (2026-10-27/28).** A Server Core 2022 DC (`DC22-2`, Standard, the only DC of its own forest, promoted that day) had shown event 8000 in an earlier attempt made from a PAW. When the DC was reached for this diagnosis it had been reset: no AppLocker GPOs, empty AppLocker logs, every component present. The toolkit was then run on the DC itself (there was no management computer in that forest; [Before you start](#before-you-start-where-to-run-the-toolkit)), after the 2026-10 cumulative update (build 20348.4529 to 20348.5761): build, both GPOs, Audit with refresh, validate, diagnose. **Result: no event 8000.** The policy converted and applied - effective `Exe/Msi/Script/Appx = AuditOnly`, `GPO processing` Registry and Security OK, 8002/8005 events flowing - and the DC logged **8001 about 90 seconds after the refresh** (Server 2025 logs it within a second; the `AppLocker policy events` row says so when the policy is already effective and the event has not arrived yet). The earlier 8000 could therefore not be reproduced on a patched Server Core 2022; its status code was never captured. If it returns, `7_AL_diagnose.ps1` captures the status, and the causes above apply in that order. The *description cannot be found ... The handle is invalid* text seen in Event Viewer during that session came from a window that had stayed connected across two DC restarts (21:12 and 21:32 local time). After the DC's next restart, at 21:47, Event Viewer was opened again (21:59) and every event rendered: the screenshots under *Expected outcome*. The earlier report of *8000 ... AppLocker cannot be found* most likely combined a real 8000 with this display effect. Evidence: the `Outputs\<profile>\diag-<ts>\DC22-2.holonet.local\` folder and the `Logs\3_AL_set_mode-Audit-<ts>-gpresult\` reports of that run. On 2026-10-28 the DC went to Enforce: STIG item NotAFinding, 0 blocked events ([section 4](#audit-then-enforce-the-stig-result-after-each-mode)).
 
 ---
 
@@ -417,6 +475,7 @@ Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps
 - [ ] 2022 and 2025 DCs: one DC of the other version is in `ExtraReferenceServers`, and pre-flight shows `Versions` OK ([section 2](#dcs-of-both-versions)).
 - [ ] Pre-flight shows no `PowerShell 2.0 … installed` warning ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
 - [ ] 2022 results recorded: **WN22-00-000080 / V-254245** from `6_AL_stig_check.ps1`, **WN22-00-000410 / V-254278** from pre-flight or section 3 ([section 4](#4-the-server-2022-stig-ids)).
+- [ ] Enforce: `6_AL_stig_check.ps1` shows **NotAFinding** for every 2022 DC, and the operators know the rollback, `3_AL_set_mode.ps1 -Mode Audit -Refresh` ([section 4](#audit-then-enforce-the-stig-result-after-each-mode)).
 - [ ] Microsoft's Server Core support statement recorded with your evidence ([section 6](#6-applocker-on-server-core-microsofts-support-statement)).
 - [ ] No AppLocker event 8000 on any 2022 DC after the first refresh (`3_AL_set_mode.ps1 -Refresh` / `4_AL_validate.ps1`, row `AppLocker policy events`); otherwise [section 7](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied) and the diagnosis folder kept with the evidence.
 

@@ -541,7 +541,7 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | 8 | `5_AL_review_events` | 0 would-be-blocked events; 8002 / 8005 allowed events flowing |
 | 9 | `dcdiag /q` | only the DFSREvent and SystemLog tests report events (SYSVOL replication warnings after the promotion of the same day, a Secure Boot certificate notice, an ETW publisher error); nothing AppLocker-related |
 
-Enforce was not enabled on that DC (an Audit period comes first). The event 8000 seen there in an earlier, unrecorded attempt did not recur ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)).
+On 2026-10-28, after a review that found no would-be-blocked event, the DC went to **Enforce**: `3_AL_set_mode -Mode Enforce -Refresh` PASSED, `4_AL_validate -Mode Enforce` PASSED, `6_AL_stig_check` **WN22-00-000080 / V-254245: NotAFinding**, 0 blocked events, `dcdiag` unchanged ([SERVER-2022.md, section 4](SERVER-2022.md#audit-then-enforce-the-stig-result-after-each-mode), with the STIG result after each mode). The event 8000 seen there in an earlier, unrecorded attempt did not recur ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)).
 
 ---
 
