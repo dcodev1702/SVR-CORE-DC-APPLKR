@@ -1,6 +1,6 @@
 # AppLocker on Server Core 2022 domain controllers
 
-Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Windows Server 2025**. This page is for domain controllers that run **Windows Server 2022 (Server Core)**, alone or next to 2025 DCs.
+Part of [SVR-CORE-DC-APPLKR](../README.md). The README and the lab run use **Windows Server 2025**. This page is for domain controllers that run **Windows Server 2022 (Server Core)**, alone or next to 2025 DCs.
 
 > [!NOTE]
 > **The steps in the README are the same on Server 2022:** same AppLocker, same policy format, same two GPOs, same scripts. Three things differ, and the scripts handle each one:
@@ -31,7 +31,7 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 
 ## Before you start: where to run the toolkit
 
-**From a PAW (the default).** Run every script on a PAW or another management computer that is joined to the DCs' domain and has RSAT, as the README describes ([sections 3 and 4](README.md#3-prerequisites)). Nothing is copied to the DCs by hand: the build copies AaronLocker to `C:\AaronLocker` on the reference DC over WinRM and deletes it afterwards, and every other step works over WinRM and Group Policy. The lab's Server Core 2025 DC was done this way.
+**From a PAW (the default).** Run every script on a PAW or another management computer that is joined to the DCs' domain and has RSAT, as the README describes ([sections 3 and 4](../README.md#3-prerequisites)). Nothing is copied to the DCs by hand: the build copies AaronLocker to `C:\AaronLocker` on the reference DC over WinRM and deletes it afterwards, and every other step works over WinRM and Group Policy. The lab's Server Core 2025 DC was done this way.
 
 **On the DC itself (optional).** Copy the repository to a DC and run the scripts there when:
 
@@ -43,7 +43,7 @@ Every DC already has the Group Policy and Active Directory modules, so nothing h
 
 ### Copy the repository from the PAW to the DC
 
-You need the repository zip on the PAW, as in [README section 4](README.md#4-bring-the-repository-into-the-disconnected-network) (*Code > Download ZIP*, carried across your transfer path), and WinRM from the PAW to the DC, which Windows Server enables by default. No file share is used. In PowerShell on the PAW, in the folder that holds the zip, set the three values, then run the block:
+You need the repository zip on the PAW, as in [README section 4](../README.md#4-bring-the-repository-into-the-disconnected-network) (*Code > Download ZIP*, carried across your transfer path), and WinRM from the PAW to the DC, which Windows Server enables by default. No file share is used. In PowerShell on the PAW, in the folder that holds the zip, set the three values, then run the block:
 
 ```powershell
 $Dc   = 'dc22-01.contoso.com'               # the DC that runs the toolkit
@@ -102,7 +102,7 @@ Remove-PSSession $S
 
 ### Run the scripts on the DC
 
-At the DC's console (on Server Core, exit `sconfig` to PowerShell), or from the PAW in a remote session (`Enter-PSSession -ComputerName $Dc`). The README's run order applies unchanged ([section 6](README.md#6-run-order-at-a-glance)):
+At the DC's console (on Server Core, exit `sconfig` to PowerShell), or from the PAW in a remote session (`Enter-PSSession -ComputerName $Dc`). The README's run order applies unchanged ([section 6](../README.md#6-run-order-at-a-glance)):
 
 ```powershell
 Set-Location C:\SVR-CORE-DC-APPLKR\scripts
@@ -118,7 +118,7 @@ Setting Audit and then Enforce, with the STIG result after each mode and the rol
 | At the DC's console | The Y/N prompts work as on a management computer. With more than one DC in scope, run the scripts here: your console logon lets the DC reach the other DCs over WinRM. |
 | In a remote session from the PAW | The scripts cannot show a Y/N prompt there, so each script that changes something stops with *STOP: this change needs a Y/N confirmation but the session is non-interactive*. Check the plan with `-WhatIf`, then run the script again with `-NoConfirm`. A remote session also cannot open a second WinRM hop: with more than one DC in scope, the DC cannot reach the other DCs from there. Use the console, or the PAW. |
 
-![A remote PowerShell session on DC22-2 lists C:\SVR-CORE-DC-APPLKR: the folders AaronLocker, Customizations, images, Logs, Outputs, scripts and tests, and the files .gitattributes, .gitignore, README.md, SERVER-2022.md and THIRD-PARTY-NOTICES.md](images/SERVER-2022-Toolkit-On-DC.png)
+![A remote PowerShell session on DC22-2 lists C:\SVR-CORE-DC-APPLKR: the folders AaronLocker, Customizations, images, Logs, Outputs, scripts and tests, and the files .gitattributes, .gitignore, README.md, SERVER-2022.md and THIRD-PARTY-NOTICES.md](../images/SERVER-2022-Toolkit-On-DC.png)
 
 <sub>The repository on the lab's DC22-2, in a remote PowerShell session. The runs created `Logs` and `Outputs` there.</sub>
 
@@ -151,7 +151,7 @@ Build **20348** is Windows Server 2022; build **26100** is Windows Server 2025. 
 
 | Your DCs | What to do |
 |---|---|
-| **All Server 2025** | Nothing on this page applies. Follow the [README](README.md). |
+| **All Server 2025** | Nothing on this page applies. Follow the [README](../README.md). |
 | **All Server 2022** | Follow the README with a **2022 DC as `ReferenceServer`** ([section 2](#all-your-dcs-run-server-2022)), and remove PowerShell 2.0 ([section 3](#3-remove-powershell-20-from-the-2022-dcs)). |
 | **A mix of 2022 and 2025** | Also list one DC of the other version in **`ExtraReferenceServers`** ([section 2](#dcs-of-both-versions)), and remove PowerShell 2.0 from the 2022 DCs. |
 
@@ -169,7 +169,7 @@ The deny list works the same way. The policy denies the bypass tools (`cipher`, 
 
 ### All your DCs run Server 2022
 
-Leave `ReferenceServer` at `PDC` in `scripts\AL-Settings.psd1` (the PDC emulator, a 2022 DC here), or set it to one of your 2022 DCs, and follow the README as written. Pre-flight must show `Versions: every server checked runs the version of a reference server`. The lab verification ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)) ran on Server 2025, so on Server 2022 your Audit period is the proof. Don't shorten it.
+Leave `ReferenceServer` at `PDC` in `scripts\AL-Settings.psd1` (the PDC emulator, a 2022 DC here), or set it to one of your 2022 DCs, and follow the README as written. Pre-flight must show `Versions: every server checked runs the version of a reference server`. The lab verification ([README, Appendix A](../README.md#appendix-a--lab-verification-2026-10-26)) ran on Server 2025, so on Server 2022 your Audit period is the proof. Don't shorten it.
 
 ### DCs of both versions
 
@@ -190,7 +190,7 @@ All DCs sit in the Domain Controllers OU and get the same GPO, so one policy has
 
 To try a DC before you edit the settings: `.\0_AL_pre-flight.ps1 -ExtraReferenceServers dc22-01.contoso.com`.
 
-**Step 2 — Build.** Run `.\1_AL_build_policy.ps1`, or add `-ExtraReferenceServers dc22-01.contoso.com` for a single run. On top of the README's [step 4](README.md#step-4--build-the-baseline), it:
+**Step 2 — Build.** Run `.\1_AL_build_policy.ps1`, or add `-ExtraReferenceServers dc22-01.contoso.com` for a single run. On top of the README's [step 4](../README.md#step-4--build-the-baseline), it:
 
 1. Prepares a temporary folder on each extra reference DC too (`C:\AaronLocker-1`, `C:\AaronLocker-2`, ..., deleted afterwards). A DC that can't run AaronLocker stops the build before the first scan.
 2. Scans the reference DC and each extra reference DC.
@@ -215,12 +215,12 @@ If the other version adds nothing, it says *the extra reference servers add noth
 | `ScanResults-<DC>\` | Each DC's own scan |
 | `build-info.json` | `ExtraReferenceServers` (each DC with its version), `MergedScan.AddedByExtraServers`, and `VersionsNotScanned` |
 
-If a DC in the target OUs runs a version that none of the scanned DCs runs, the build ends with a warning that names it (the versions come from AD). Then deploy as usual: README steps 5 and 6. If you're already in Enforce, follow *Rebuild* in [README section 12](README.md#12-ongoing-operations).
+If a DC in the target OUs runs a version that none of the scanned DCs runs, the build ends with a warning that names it (the versions come from AD). Then deploy as usual: README steps 5 and 6. If you're already in Enforce, follow *Rebuild* in [README section 12](../README.md#12-ongoing-operations).
 
 **Step 3 — Read what the other version adds.** Each added line is a folder that a non-admin can write to on that DC, or a tool that only that DC has. In `ScanResults-<DC>\Writable_Full_windir.xml` (also `_PF` and `_PF86`), every excluded folder lists the accounts that can write to it (`Grantee`). The cause is often software rather than the Windows version:
 
 - **An agent on only some DCs** (Defender for Endpoint, the MECM client, the Nessus Agent). The merged policy already excepts the folder on every DC. To keep the DCs alike, install the same agents everywhere. A `Package\S-1-15-2-...` grantee is an app container, not a user account. In the lab, those are Defender for Endpoint folders.
-- **A group that really is an administrators group.** List it in `KnownAdmins` ([README, section 11](README.md#11-who-counts-as-an-administrator)) and build again.
+- **A group that really is an administrators group.** List it in `KnownAdmins` ([README, section 11](../README.md#11-who-counts-as-an-administrator)) and build again.
 
 > [!NOTE]
 > **Lab status (2026-10-27):** the lab has one Server 2025 DC and no Server 2022 DC. The merge was verified there end to end with the same DC listed again under its short name, plus a simulated second scan with one extra folder and one extra tool: both ended up in the rules, and the self-check caught a policy that lacked them. A real mix of 2022 and 2025 DCs was not available, so your first merged build and its Audit period are the proof.
@@ -330,11 +330,11 @@ README steps 6 to 9 on a Server 2022 DC, with what `6_AL_stig_check.ps1` reports
 
 In Audit the STIG item is **Open**. The rules log what they would block and block nothing, so this is the expected result: Audit is a staging step, not compliance.
 
-![6_AL_stig_check.ps1 on DC22-2 in Audit: AppLocker GPO link JSLC_AppLocker_AUDIT_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status Open, Reason "EXE rules are AuditOnly - not enforced (Audit is a staging step, not compliance)"; Exe, Msi, Script and Appx AuditOnly, Dll NotConfigured, Application Identity Running / Auto; summary 0 NotAFinding, 1 Open/Not_Reviewed of 1 server(s)](images/SERVER-2022-STIG-Audit-Open.png)
+![6_AL_stig_check.ps1 on DC22-2 in Audit: AppLocker GPO link JSLC_AppLocker_AUDIT_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status Open, Reason "EXE rules are AuditOnly - not enforced (Audit is a staging step, not compliance)"; Exe, Msi, Script and Appx AuditOnly, Dll NotConfigured, Application Identity Running / Auto; summary 0 NotAFinding, 1 Open/Not_Reviewed of 1 server(s)](../images/SERVER-2022-STIG-Audit-Open.png)
 
 <sub>The lab's DC22-2 in Audit (2026-10-28): **WN22-00-000080 / V-254245: Open**.</sub>
 
-**2. The Audit period.** Leave Audit on and review what would have been blocked ([README, step 7](README.md#step-7--the-audit-period-and-review)):
+**2. The Audit period.** Leave Audit on and review what would have been blocked ([README, step 7](../README.md#step-7--the-audit-period-and-review)):
 
 ```powershell
 .\5_AL_review_events.ps1 -Days 14
@@ -352,7 +352,7 @@ Switch to Enforce only when the review shows nothing that the DC still needs. In
 
 In Enforce the STIG item is **NotAFinding**: the EXE rules are enforced, with allow rules, and Application Identity is running.
 
-![6_AL_stig_check.ps1 on DC22-2 in Enforce: AppLocker GPO link JSLC_AppLocker_ENFORCE_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status NotAFinding, Reason "AppLocker enforces a deny-by-default allowlist: EXE rules Enabled with allow rules, Application Identity running"; Exe, Msi, Script and Appx Enabled, Dll NotConfigured, Blocked24h 0; summary 1 NotAFinding, 0 Open/Not_Reviewed of 1 server(s)](images/SERVER-2022-STIG-Enforce-NotAFinding.png)
+![6_AL_stig_check.ps1 on DC22-2 in Enforce: AppLocker GPO link JSLC_AppLocker_ENFORCE_Domain_Controller; WN22-00-000080 / V-254245, CAT II, Status NotAFinding, Reason "AppLocker enforces a deny-by-default allowlist: EXE rules Enabled with allow rules, Application Identity running"; Exe, Msi, Script and Appx Enabled, Dll NotConfigured, Blocked24h 0; summary 1 NotAFinding, 0 Open/Not_Reviewed of 1 server(s)](../images/SERVER-2022-STIG-Enforce-NotAFinding.png)
 
 <sub>The lab's DC22-2 in Enforce (2026-10-28): **WN22-00-000080 / V-254245: NotAFinding**.</sub>
 
@@ -369,7 +369,7 @@ Then check that the DC works (`dcdiag`, SYSVOL and NETLOGON, logons, Group Polic
 >
 > - The script disables the Enforce link first, then enables the Audit link, and runs `gpupdate` twice. Once the DC has refreshed, nothing is blocked any more; what Enforce would block is logged as 8003 / 8006 instead. `-WhatIf` shows the two link changes without making them.
 > - Elevated administrators are always allowed, so Enforce cannot block the rollback itself. A **non-elevated** session cannot run the toolkit from `C:\SVR-CORE-DC-APPLKR`: in Enforce that folder is not an allowed path for non-admins. At the DC's console, `whoami /groups` must show *High Mandatory Level*. A remote session from the PAW is always elevated.
-> - The STIG item is **Open** again until you return to Enforce. To remove the AppLocker rules entirely, use `-Mode Off`; to delete the GPOs and reset the DCs, `C:\Admin` included, use `8_AL_reset.ps1` ([README, section 13](README.md#13-rollback)).
+> - The STIG item is **Open** again until you return to Enforce. To remove the AppLocker rules entirely, use `-Mode Off`; to delete the GPOs and reset the DCs, `C:\Admin` included, use `8_AL_reset.ps1` ([README, section 13](../README.md#13-rollback)).
 
 ---
 
@@ -381,9 +381,9 @@ Then check that the DC works (`dcdiag`, SYSVOL and NETLOGON, logons, Group Polic
 | Deployment | The same two GPOs with one link enabled, and Application Identity set to Automatic through the GPO. |
 | Remoting | WinRM is on by default on both, so the scripts reach the DCs the same way. |
 | PowerShell on the DCs | Windows PowerShell 5.1 on both. |
-| Logs and events | The same AppLocker logs and event IDs ([README, Appendix C](README.md#appendix-c--event-ids)). |
+| Logs and events | The same AppLocker logs and event IDs ([README, Appendix C](../README.md#appendix-c--event-ids)). |
 | Server Core deny-list fix | The `Customizations` overlay works on both. |
-| The process | Audit before Enforce, the review, rollback and ongoing operations ([README, sections 7, 12 and 13](README.md#7-step-by-step)). |
+| The process | Audit before Enforce, the review, rollback and ongoing operations ([README, sections 7, 12 and 13](../README.md#7-step-by-step)). |
 
 ---
 
@@ -394,7 +394,7 @@ Then check that the DC works (`dcdiag`, SYSVOL and NETLOGON, logons, Group Polic
 
 What it means for you:
 
-- The lab applied and enforced this policy on a Server Core 2025 DC, and the DC kept working ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)). On your DCs, the Audit period is the proof.
+- The lab applied and enforced this policy on a Server Core 2025 DC, and the DC kept working ([README, Appendix A](../README.md#appendix-a--lab-verification-2026-10-26)). On your DCs, the Audit period is the proof.
 - If you open a Microsoft support case about AppLocker on these DCs, expect this statement to come up.
 - Assessors may ask about it. Record it with your accepted risks (for example in the checklist comments or your POA&M), next to the Audit and Enforce evidence.
 
@@ -402,7 +402,7 @@ What it means for you:
 
 ## 7. AppLocker event 8000 on a Server Core 2022 DC: the policy is delivered but not applied
 
-**Symptom.** The GPO applies (gpresult lists it under *Applied Group Policy Objects*), but the DC's *Microsoft-Windows-AppLocker/EXE and DLL* log shows **event 8000** - *AppID policy conversion failed. Status ...* - instead of **8001** (*The AppLocker policy was applied successfully to this computer*). `Get-AppLockerPolicy -Effective -Xml` is empty, `4_AL_validate.ps1` reports `Effective policy <DC> ... not applied` and `AppLocker policy events <DC> ... newest is 8000`, and nothing is audited or enforced on that DC. A Server Core **2025** DC applies the same GPOs ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)).
+**Symptom.** The GPO applies (gpresult lists it under *Applied Group Policy Objects*), but the DC's *Microsoft-Windows-AppLocker/EXE and DLL* log shows **event 8000** - *AppID policy conversion failed. Status ...* - instead of **8001** (*The AppLocker policy was applied successfully to this computer*). `Get-AppLockerPolicy -Effective -Xml` is empty, `4_AL_validate.ps1` reports `Effective policy <DC> ... not applied` and `AppLocker policy events <DC> ... newest is 8000`, and nothing is audited or enforced on that DC. A Server Core **2025** DC applies the same GPOs ([README, Appendix A](../README.md#appendix-a--lab-verification-2026-10-26)).
 
 Event Viewer may show every AppLocker event - 8000, 8001 and 8002 alike - as *The description for Event ID ... from source Microsoft-Windows-AppLocker cannot be found ... The handle is invalid*, followed by the raw field values. In the lab this was **an Event Viewer window that had stayed connected to the DC while the DC restarted**. The window keeps the handle it opened to the DC's event log service for rendering AppLocker messages; the restart invalidates it (*The handle is invalid* is Windows error 6). New events still appear in the list, but none can be rendered. **Close Event Viewer and connect again after the DC's last restart**: the same events then render normally. The events themselves were fine all along. The same text appears when an exported `.evtx` is opened on a computer without the AppLocker provider and without its `LocaleMetaData` folder. For an 8000, the single number under *The following information was included with the event* is the **Status** - note it down.
 
@@ -450,11 +450,11 @@ Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps
 
 **Expected outcome.** A DC that applies the policy shows only Information events with readable descriptions, and no 8000. The lab's Server Core 2022 DC in Audit, in Event Viewer connected after the DC's last restart (2026-10-27):
 
-![Event Viewer connected to DC22-2: the AppLocker EXE and DLL log holds three Information events - 8001 at 9:49:46 PM and two 8002 at 10:02:28 PM - and the selected 8002 reads "%SYSTEM32%\CONHOST.EXE was allowed to run."](images/SERVER-2022-Expected-EXE-and-DLL.png)
+![Event Viewer connected to DC22-2: the AppLocker EXE and DLL log holds three Information events - 8001 at 9:49:46 PM and two 8002 at 10:02:28 PM - and the selected 8002 reads "%SYSTEM32%\CONHOST.EXE was allowed to run."](../images/SERVER-2022-Expected-EXE-and-DLL.png)
 
 <sub>EXE and DLL: 8001 after the restart (the policy was loaded), then 8002 for each program that ran and was allowed.</sub>
 
-![Event Viewer connected to DC22-2: the AppLocker MSI and Script log holds one Information event 8005, which reads "%OSDRIVE%\USERS\LORENZO\APPDATA\LOCAL\TEMP\__PSSCRIPTPOLICYTEST_FBBQ3YQK.NZT.PS1 was allowed to run."](images/SERVER-2022-Expected-MSI-and-Script.png)
+![Event Viewer connected to DC22-2: the AppLocker MSI and Script log holds one Information event 8005, which reads "%OSDRIVE%\USERS\LORENZO\APPDATA\LOCAL\TEMP\__PSSCRIPTPOLICYTEST_FBBQ3YQK.NZT.PS1 was allowed to run."](../images/SERVER-2022-Expected-MSI-and-Script.png)
 
 <sub>MSI and Script: 8005 for a script that ran and was allowed.</sub>
 
@@ -504,4 +504,4 @@ Checked on 2026-10-27.
 - Microsoft Learn: [Security Descriptor Definition Language for Conditional ACEs](https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-definition-language-for-conditional-aces-). The XA / XD conditional ACE strings, the attribute, literal and operator syntax the conversion check builds.
 - James Forshaw, [The Internals of AppLocker - Part 3](https://www.tiraniddo.dev/2019/11/the-internals-of-applocker-part-3.html) (2019). The compiled `Exe.AppLocker` file carries the security descriptor; its DACL holds one callback ACE per rule with conditions such as `APPID://PATH Contains "%WINDIR%\*"`, `(Exists APPID://SHA256HASH) && (APPID://SHA256HASH Any_of {#...})` and `(Exists APPID://FQBN) && (APPID://FQBN >= {"publisher\product\file", version})`.
 - Microsoft TechNet forum (archived): [AppID policy conversion failed. Status The access control list (ACL) structure is invalid](https://learn.microsoft.com/en-us/archive/msdn-technet-forums/9221e2c3-d382-44da-b4c9-b6a47a81d969) (2020, Windows 10 1809). The only public report of this status; no root cause was found.
-- This repository: AaronLocker's `Disallow PowerShell v2` rules are in the DLL collection of [`DefaultRulesWithPlaceholders.xml`](AaronLocker/AaronLocker/Support/DefaultRulesWithPlaceholders.xml). `New-ALDeployXml` in [`scripts/AL-Common.ps1`](scripts/AL-Common.ps1) empties that collection when `EnableDllRules` is `$false`. The deny list comes from [`GetExeFilesToDenyList.ps1`](Customizations/CustomizationInputs/GetExeFilesToDenyList.ps1). AaronLocker's [`Create-Policies.ps1`](AaronLocker/AaronLocker/Create-Policies.ps1) builds the rules from the scan files already in `ScanResults` when it runs without `-Rescan` (*"scanned output can be copied to another machine and rules can be maintained without needing to rescan"*); `Merge-ALScanResults` and `Get-ALMissingScanEntries` in `AL-Common.ps1` merge the scans and check the rules against them.
+- This repository: AaronLocker's `Disallow PowerShell v2` rules are in the DLL collection of [`DefaultRulesWithPlaceholders.xml`](../AaronLocker/AaronLocker/Support/DefaultRulesWithPlaceholders.xml). `New-ALDeployXml` in [`scripts/AL-Common.ps1`](../scripts/AL-Common.ps1) empties that collection when `EnableDllRules` is `$false`. The deny list comes from [`GetExeFilesToDenyList.ps1`](../Customizations/CustomizationInputs/GetExeFilesToDenyList.ps1). AaronLocker's [`Create-Policies.ps1`](../AaronLocker/AaronLocker/Create-Policies.ps1) builds the rules from the scan files already in `ScanResults` when it runs without `-Rescan` (*"scanned output can be copied to another machine and rules can be maintained without needing to rescan"*); `Merge-ALScanResults` and `Get-ALMissingScanEntries` in `AL-Common.ps1` merge the scans and check the rules against them.
