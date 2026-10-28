@@ -8,9 +8,13 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 > 2. **PowerShell 2.0.** It can still be installed on Server 2022, and it doesn't apply the Constrained Language Mode that AppLocker's script rules rely on. Pre-flight warns when it's installed. Remove it ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
 > 3. **The STIG IDs.** The Server 2022 item is **WN22-00-000080 / V-254245**. `6_AL_stig_check.ps1` reports each DC under the item for its version ([section 4](#4-the-server-2022-stig-ids)).
 >
+> **Where to run it:** from a PAW joined to the DCs' domain, with nothing copied to the DCs (the default), or on a DC itself with the repository copied there from the PAW: [Before you start](#before-you-start-where-to-run-the-toolkit).
+>
 > And one thing to watch for: a Server Core 2022 DC that receives the GPO but logs **AppLocker event 8000** (*AppID policy conversion failed*) instead of 8001 has **no policy loaded**. [Section 7](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied) says how to diagnose it (`7_AL_diagnose.ps1`) and what to test first (`EnableAppxRules = $false`).
 
 ## Contents
+
+- [Before you start: where to run the toolkit](#before-you-start-where-to-run-the-toolkit) - from a PAW, or copied to the DC (optional)
 
 1. [Which case are you in?](#1-which-case-are-you-in)
 2. [Cover every Windows Server version in the build](#2-cover-every-windows-server-version-in-the-build)
@@ -21,6 +25,113 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 7. [AppLocker event 8000 on a Server Core 2022 DC: the policy is delivered but not applied](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)
 8. [Checklist](#8-checklist)
 - [Sources](#sources)
+
+---
+
+## Before you start: where to run the toolkit
+
+**From a PAW (the default).** Run every script on a PAW or another management computer that is joined to the DCs' domain and has RSAT, as the README describes ([sections 3 and 4](README.md#3-prerequisites)). Nothing is copied to the DCs by hand: the build copies AaronLocker to `C:\AaronLocker` on the reference DC over WinRM and deletes it afterwards, and every other step works over WinRM and Group Policy. The lab's Server Core 2025 DC was done this way.
+
+**On the DC itself (optional).** Copy the repository to a DC and run the scripts there when:
+
+- no management computer is joined to the DCs' domain. The lab's Server Core 2022 DC is the only DC of its own forest, and the PAW belongs to another forest;
+- the PAW cannot reach the DCs over WinRM; or
+- you want the toolkit and its evidence (`Logs`, `Outputs`) on the DC.
+
+Every DC already has the Group Policy and Active Directory modules, so nothing has to be installed. When a script targets the computer it runs on, it does the work in-process instead of over WinRM, so the build also works when the DC is its own reference server.
+
+### Copy the repository from the PAW to the DC
+
+You need the repository zip on the PAW, as in [README section 4](README.md#4-bring-the-repository-into-the-disconnected-network) (*Code > Download ZIP*, carried across your transfer path), and WinRM from the PAW to the DC, which Windows Server enables by default. No file share is used. In PowerShell on the PAW, in the folder that holds the zip, set the three values, then run the block:
+
+```powershell
+$Dc   = 'dc22-01.contoso.com'               # the DC that runs the toolkit
+$Zip  = '.\SVR-CORE-DC-APPLKR-main.zip'     # the repository zip
+$Dest = 'C:\SVR-CORE-DC-APPLKR'             # on the DC; never under C:\AaronLocker (the build deletes that folder)
+
+Unblock-File -LiteralPath $Zip                                      # clear the "downloaded from the Internet" mark on the PAW
+$Hash = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash     # compare with your transfer record
+$S = New-PSSession -ComputerName $Dc
+
+# 1. An administrators-only folder on the DC (a new folder under C:\ would let every user create files in it)
+Invoke-Command -Session $S -ArgumentList $Dest -ScriptBlock {
+    param($Dest)
+    New-Item -Path $Dest -ItemType Directory -Force | Out-Null
+    icacls.exe $Dest /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+}
+
+# 2. Copy the zip over WinRM (no file share needed), check its hash on the DC, unpack it, unblock every file
+Copy-Item -LiteralPath $Zip -Destination "$Dest\repo.zip" -ToSession $S
+Invoke-Command -Session $S -ArgumentList $Dest, $Hash -ScriptBlock {
+    param($Dest, $Hash)
+    $File = Join-Path $Dest 'repo.zip'
+    if ((Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash -ne $Hash) { throw 'The zip on the DC does not match the zip on the PAW.' }
+    $Tmp = Join-Path $Dest '_unpack'
+    Expand-Archive -LiteralPath $File -DestinationPath $Tmp -Force
+    # A GitHub zip holds one top folder (SVR-CORE-DC-APPLKR-main); its content goes into $Dest. Logs and Outputs of earlier runs stay.
+    $Top = Get-ChildItem -LiteralPath $Tmp -Directory | Select-Object -First 1
+    Copy-Item -Path (Join-Path $Top.FullName '*') -Destination $Dest -Recurse -Force
+    Remove-Item -LiteralPath $Tmp, $File -Recurse -Force
+    Get-ChildItem -LiteralPath $Dest -Recurse -File | Unblock-File   # clear the "downloaded from the Internet" mark on the DC
+    Get-ChildItem -LiteralPath $Dest | Select-Object Mode, LastWriteTime, Name
+}
+Remove-PSSession $S
+```
+
+1. It creates the folder on the DC for SYSTEM and Administrators only. A new folder under `C:\` would otherwise let every user create files in it, next to scripts that a Domain Admin runs.
+2. It copies the zip over WinRM and refuses it if its SHA-256 on the DC differs from the one on the PAW. It then unpacks the zip into the folder and deletes it.
+3. It runs `Unblock-File` twice: on the zip on the PAW before the copy, and on every file on the DC after unpacking. A zip downloaded from the Internet carries the *downloaded from the Internet* mark; files that keep it count as remote under the execution policy (`RemoteSigned`), and the toolkit's scripts are not signed.
+4. The listing at the end must show `AaronLocker`, `Customizations`, `images`, `scripts`, `tests` and the `.md` files.
+
+To update the copy later, run the same block with the newer zip. The files are replaced; the `Logs` and `Outputs` of earlier runs stay.
+
+Copied the repository to the DC another way (an SMB share, removable media, unpacked with Explorer)? Those copies keep the mark. Unblock every file once on the DC, at its console or in a remote session:
+
+```powershell
+Get-ChildItem -LiteralPath C:\SVR-CORE-DC-APPLKR -Recurse -File | Unblock-File
+```
+
+**Your settings.** Edit `AL-Settings.psd1` on the PAW (`ReferenceServer` = a DC in scope, for example this one) and copy it over the DC's copy:
+
+```powershell
+$S = New-PSSession -ComputerName $Dc
+Copy-Item -LiteralPath '.\AL-Settings.psd1' -Destination "$Dest\scripts\" -ToSession $S     # your edited settings file
+Remove-PSSession $S
+```
+
+### Run the scripts on the DC
+
+At the DC's console (on Server Core, exit `sconfig` to PowerShell), or from the PAW in a remote session (`Enter-PSSession -ComputerName $Dc`). The README's run order applies unchanged ([section 6](README.md#6-run-order-at-a-glance)):
+
+```powershell
+Set-Location C:\SVR-CORE-DC-APPLKR\scripts
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\0_AL_get_toolkit.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\0_AL_pre-flight.ps1
+# ... and so on: 0_AL_secure_folders, 1_AL_build_policy, 2_AL_create_gpos, 3_AL_set_mode -Mode Audit -Refresh, 4_AL_validate
+```
+
+| Where you run them | What to know |
+|---|---|
+| At the DC's console | The Y/N prompts work as on a management computer. With more than one DC in scope, run the scripts here: your console logon lets the DC reach the other DCs over WinRM. |
+| In a remote session from the PAW | The scripts cannot show a Y/N prompt there, so each script that changes something stops with *STOP: this change needs a Y/N confirmation but the session is non-interactive*. Check the plan with `-WhatIf`, then run the script again with `-NoConfirm`. A remote session also cannot open a second WinRM hop: with more than one DC in scope, the DC cannot reach the other DCs from there. Use the console, or the PAW. |
+
+![A remote PowerShell session on DC22-2 lists C:\SVR-CORE-DC-APPLKR: the folders AaronLocker, Customizations, images, Logs, Outputs, scripts and tests, and the files .gitattributes, .gitignore, README.md, SERVER-2022.md and THIRD-PARTY-NOTICES.md](images/SERVER-2022-Toolkit-On-DC.png)
+
+<sub>The repository on the lab's DC22-2, in a remote PowerShell session. The runs created `Logs` and `Outputs` there.</sub>
+
+### Bring the results back to the PAW
+
+The transcripts, CSV results, rule files, gpresult reports and evidence files are written to `Logs` and `Outputs` on the DC. Copy them to the PAW for your records:
+
+```powershell
+New-Item -Path '.\DC-run' -ItemType Directory -Force | Out-Null
+$S = New-PSSession -ComputerName $Dc
+Copy-Item -Path "$Dest\Logs", "$Dest\Outputs" -Destination '.\DC-run' -FromSession $S -Recurse -Force
+Remove-PSSession $S
+```
+
+> [!NOTE]
+> **Lab status (2026-10-27).** Verified from the lab's Windows 11 management computer against DC22-2, with a zip in GitHub's layout: a fresh copy (73 of 73 files, the folder for SYSTEM and Administrators only, no leftovers), an update over a copy that already had `Logs` (kept), the *downloaded from the Internet* mark removed from the zip on the PAW and from every file on the DC (also with the standalone command, on files marked on purpose), `0_AL_get_toolkit.ps1` run from the copy, and `Logs` and `Outputs` copied back. A remote session reported itself non-interactive, so the scripts' Y/N prompts need `-NoConfirm` there. The full run on that DC, up to Audit, is in [section 7](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied).
 
 ---
 
@@ -274,12 +385,6 @@ It decodes the Status of every 8000 of the last 30 days, checks the AppLocker co
 
 Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps1` must show `AppLocker policy events <DC> ... newest is 8001` and `Effective policy <DC>` OK on that DC, and the Audit period starts over for it.
 
-**Running the toolkit on the DC itself.** A forest with no management computer in it, like the lab's second forest, can run the toolkit on one of its DCs: every DC already has the Group Policy and Active Directory modules. Copy the repository to the DC, for example `C:\SVR-CORE-DC-APPLKR`, and run the scripts there, at the console or in a remote PowerShell session. A server that is the computer a script runs on is reached in-process instead of over WinRM, so the build also works when the DC is its own reference server.
-
-![A remote PowerShell session on DC22-2 lists C:\SVR-CORE-DC-APPLKR: the folders AaronLocker, Customizations, images, Logs, Outputs, scripts and tests, and the files .gitattributes, .gitignore, README.md, SERVER-2022.md and THIRD-PARTY-NOTICES.md](images/SERVER-2022-Toolkit-On-DC.png)
-
-<sub>The repository on DC22-2, in a remote PowerShell session. The runs create Logs and Outputs there.</sub>
-
 **Expected outcome.** A DC that applies the policy shows only Information events with readable descriptions, and no 8000. The lab's Server Core 2022 DC in Audit, in Event Viewer connected after the DC's last restart (2026-10-27):
 
 ![Event Viewer connected to DC22-2: the AppLocker EXE and DLL log holds three Information events - 8001 at 9:49:46 PM and two 8002 at 10:02:28 PM - and the selected 8002 reads "%SYSTEM32%\CONHOST.EXE was allowed to run."](images/SERVER-2022-Expected-EXE-and-DLL.png)
@@ -300,12 +405,13 @@ Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps
 | **8000** | EXE and DLL | Must not appear. If it does, the rules are not loaded: this section |
 
 > [!NOTE]
-> **Lab status (2026-10-27/28).** A Server Core 2022 DC (`DC22-2`, Standard, the only DC of its own forest, promoted that day) had shown event 8000 in an earlier attempt made from a PAW. When the DC was reached for this diagnosis it had been reset: no AppLocker GPOs, empty AppLocker logs, every component present. The toolkit was then run on the DC itself (there was no management computer in that forest), after the 2026-10 cumulative update (build 20348.4529 to 20348.5761): build, both GPOs, Audit with refresh, validate, diagnose. **Result: no event 8000.** The policy converted and applied - effective `Exe/Msi/Script/Appx = AuditOnly`, `GPO processing` Registry and Security OK, 8002/8005 events flowing - and the DC logged **8001 about 90 seconds after the refresh** (Server 2025 logs it within a second; the `AppLocker policy events` row says so when the policy is already effective and the event has not arrived yet). The earlier 8000 could therefore not be reproduced on a patched Server Core 2022; its status code was never captured. If it returns, `7_AL_diagnose.ps1` captures the status, and the causes above apply in that order. The *description cannot be found ... The handle is invalid* text seen in Event Viewer during that session came from a window that had stayed connected across two DC restarts (21:12 and 21:32 local time). After the DC's next restart, at 21:47, Event Viewer was opened again (21:59) and every event rendered: the screenshots under *Expected outcome*. The earlier report of *8000 ... AppLocker cannot be found* most likely combined a real 8000 with this display effect. Evidence: the `Outputs\<profile>\diag-<ts>\DC22-2.holonet.local\` folder and the `Logs\3_AL_set_mode-Audit-<ts>-gpresult\` reports of that run.
+> **Lab status (2026-10-27/28).** A Server Core 2022 DC (`DC22-2`, Standard, the only DC of its own forest, promoted that day) had shown event 8000 in an earlier attempt made from a PAW. When the DC was reached for this diagnosis it had been reset: no AppLocker GPOs, empty AppLocker logs, every component present. The toolkit was then run on the DC itself (there was no management computer in that forest; [Before you start](#before-you-start-where-to-run-the-toolkit)), after the 2026-10 cumulative update (build 20348.4529 to 20348.5761): build, both GPOs, Audit with refresh, validate, diagnose. **Result: no event 8000.** The policy converted and applied - effective `Exe/Msi/Script/Appx = AuditOnly`, `GPO processing` Registry and Security OK, 8002/8005 events flowing - and the DC logged **8001 about 90 seconds after the refresh** (Server 2025 logs it within a second; the `AppLocker policy events` row says so when the policy is already effective and the event has not arrived yet). The earlier 8000 could therefore not be reproduced on a patched Server Core 2022; its status code was never captured. If it returns, `7_AL_diagnose.ps1` captures the status, and the causes above apply in that order. The *description cannot be found ... The handle is invalid* text seen in Event Viewer during that session came from a window that had stayed connected across two DC restarts (21:12 and 21:32 local time). After the DC's next restart, at 21:47, Event Viewer was opened again (21:59) and every event rendered: the screenshots under *Expected outcome*. The earlier report of *8000 ... AppLocker cannot be found* most likely combined a real 8000 with this display effect. Evidence: the `Outputs\<profile>\diag-<ts>\DC22-2.holonet.local\` folder and the `Logs\3_AL_set_mode-Audit-<ts>-gpresult\` reports of that run.
 
 ---
 
 ## 8. Checklist
 
+- [ ] Where the toolkit runs: a PAW in the DCs' domain, or a DC with the repository copied to an administrators-only folder outside `C:\AaronLocker`, its `Logs` and `Outputs` copied back to the PAW ([Before you start](#before-you-start-where-to-run-the-toolkit)).
 - [ ] DCs and their versions listed ([section 1](#1-which-case-are-you-in)).
 - [ ] Only 2022 DCs: `ReferenceServer` is a 2022 DC ([section 2](#all-your-dcs-run-server-2022)).
 - [ ] 2022 and 2025 DCs: one DC of the other version is in `ExtraReferenceServers`, and pre-flight shows `Versions` OK ([section 2](#dcs-of-both-versions)).
