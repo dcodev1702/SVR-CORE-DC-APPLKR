@@ -30,6 +30,10 @@
     A FAIL names what stops the policy on that server; a WARN names a likely cause or something to check; the rest is INFO.
     Evidence: Outputs\<profile>\diag-<timestamp>\<server>\ (CSV, XML and text files, the raw gpresult output). The rows: console and
     Logs\7_AL_diagnose-<timestamp>.csv. README, Appendix D; SERVER-2022.md, section 7 (event 8000 on Server Core 2022).
+    For a status that names an ACL or access (1336, 5) it also reads the policy store - the PolicyConverter task, the permissions of
+    System32\AppLocker and of the Srp / SrpV2 keys (SDDL, canonical order), the compiled <Collection>.AppLocker files against the
+    collections delivered - and checks the delivered rules the way Application Identity converts them (one conditional ACE per
+    rule, one ACL per collection, 64 KB each); for a 1336 the 'Hypothesis' row says which of the two the evidence supports.
 
 .PARAMETER SettingsFile
     Settings file to use. Default: AL-Settings.psd1 next to the script.
@@ -72,8 +76,8 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-27
-    Version  : 1.0
+    Date     : 2026-10-28
+    Version  : 1.1 (policy store, compiled files and the conversion check of the delivered rules; status 1336)
     Requires : Windows PowerShell 5.1 or PowerShell 7; from the management computer the RSAT ActiveDirectory module and WinRM; with
                -Local nothing beyond an elevated session on the server (gpresult needs it).
     Changes  : nothing (read-only).
@@ -210,8 +214,8 @@ try {
     foreach ($C in $ComputerName) {
         Write-Host "`n$C : collecting (components, service, events of the last $Days days, policy sources, gpresult) ..." -ForegroundColor Cyan
         try {
-            if ($Local) { $P = & $Probe $Files $Days; $Gp = Invoke-ALGpRefresh -Refresh $false -Local }
-            else { $P = Invoke-ALOn $C $Probe (([string[]]$Files), $Days); $Gp = Invoke-ALGpRefresh -ComputerName $C -Refresh $false }
+            if ($Local) { $P = & $Probe $Files $Days; $Gp = Invoke-ALGpRefresh -Refresh $false -Local; $Store = & $ALPolicyStoreProbe }
+            else { $P = Invoke-ALOn $C $Probe (([string[]]$Files), $Days); $Gp = Invoke-ALGpRefresh -ComputerName $C -Refresh $false; $Store = Invoke-ALOn $C $ALPolicyStoreProbe }
         }
         catch { Add-ALResult $R 'FAIL' "WinRM $C" $_.Exception.Message; continue }
         $Dir = Join-Path $Evidence ($C -replace '[^A-Za-z0-9.-]', '_')
@@ -229,12 +233,21 @@ try {
         Save-ALDiagCsv $Dir 'scm-appidsvc.csv' $P.ScmEvents
         Save-ALDiagCsv $Dir 'grouppolicy-events.csv' $P.GpEvents
         Save-ALDiagCsv $Dir 'decisions.csv' $P.Decisions
+        Save-ALDiagCsv $Dir 'policy-store.csv' $Store.Store
+        Save-ALDiagCsv $Dir 'compiled-policy.csv' $Store.Compiled
+        # The delivered rules as Application Identity converts them (one conditional ACE per rule, one ACL per collection, 64 KB each)
+        $Conv = $null
+        if ($P.GpoPolicyXml) {
+            try { $Conv = Test-ALPolicyConvertible ([xml]$P.GpoPolicyXml) } catch { Add-ALResult $R 'WARN' "Policy conversion $C" "the delivered rules could not be checked: $($_.Exception.Message)" }
+            if ($Conv) { Save-ALDiagCsv $Dir 'policy-conversion.csv' $Conv.Collections; Save-ALDiagCsv $Dir 'policy-problems.csv' $Conv.Problems }
+        }
         if ($P.GpoPolicyXml) { Save-ALDiagText $Dir 'policy-from-gpo-registry.xml' $P.GpoPolicyXml }
         if ($P.LocalXml) { Save-ALDiagText $Dir 'policy-local.xml' $P.LocalXml }
         if ($P.EffectiveXml) { Save-ALDiagText $Dir 'policy-effective.xml' $P.EffectiveXml }
         Save-ALDiagText $Dir 'system.txt' ((@(
                     "Computer: $($P.Computer)", "OS: $($P.Os)", "Last boot: $($P.LastBoot)", "PowerShell: $($P.PsVersion) ($($P.Language))",
                     "AppIDSvc: $($P.AppIdSvcConfig)", "appid driver: $($P.Driver)",
+                    "PolicyConverter task: $(if ($Store.Task) { "runs as $($Store.Task.Principal), $($Store.Task.State), last run $($Store.Task.LastRun), result 0x$(([int64]$Store.Task.LastResult).ToString('X'))" } else { "not found ($($Store.TaskError))" })",
                     "Event provider Microsoft-Windows-AppLocker: registered=$($P.Provider.Registered) messageFile=$($P.Provider.MessageFile) exists=$($P.Provider.MessageFileExists) logs=$($P.Provider.Logs -join ';') $($P.Provider.Error)",
                     "Packaged apps: $($P.AppxPackages)",
                     "GPO policy in the registry (HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2): $(if ($P.GpoCollections.Count) { $P.GpoCollections -join ', ' } else { 'none' })",
@@ -270,7 +283,7 @@ try {
         $Newest = @($P.PolicyEvents) | Select-Object -First 1
         if ($Newest -and $Newest.Id -eq 8000) {
             $First = $E8000[$E8000.Count - 1]
-            Add-ALResult $R 'FAIL' "Policy conversion $C" "AppID policy conversion failed (event 8000) $($E8000.Count) time(s) in $Days days, first $($First.Time), newest $($Newest.Time) with status $($Newest.Status) ($(ConvertTo-ALWin32Message $Newest.Status))$(if ($E8001.Count) { "; last success (8001) $($E8001[0].Time)" } else { '; no success (8001) in the window' }). Application Identity rejected the policy it was given: nothing is enforced or audited. See 'Delivered vs effective' below; the raw events are in events-8000.xml"
+            Add-ALResult $R 'FAIL' "Policy conversion $C" "AppID policy conversion failed (event 8000) $($E8000.Count) time(s) in $Days days, first $($First.Time), newest $($Newest.Time) with status $($Newest.Status) ($(ConvertTo-ALWin32Message $Newest.Status))$(if (Get-ALStatusHint $Newest.Status) { " - points at $(Get-ALStatusHint $Newest.Status)" })$(if ($E8001.Count) { "; last success (8001) $($E8001[0].Time)" } else { '; no success (8001) in the window' }). Application Identity rejected the policy it was given: nothing is enforced or audited. See 'Delivered vs effective' below; the raw events are in events-8000.xml"
         }
         elseif ($E8000.Count) { Add-ALResult $R 'WARN' "Policy conversion $C" "$($E8000.Count) older conversion failure(s) (8000) in $Days days, newest $($E8000[0].Time) status $($E8000[0].Status) ($(ConvertTo-ALWin32Message $E8000[0].Status)); the newest event is a success (8001 at $($Newest.Time))" }
         elseif ($E8001.Count) { Add-ALResult $R 'OK' "Policy conversion $C" "no conversion failure (8000) in $Days days; $($E8001.Count) x 8001 (policy applied), newest $($E8001[0].Time)" }
@@ -283,6 +296,15 @@ try {
         $GpoHasAppx = ($P.GpoPolicyXml -match '<RuleCollection Type="Appx" EnforcementMode="(Enabled|AuditOnly)">\s*<')
         if ($GpoHasAppx -and $P.InstallType -eq 'Server Core' -and ($MissingAppx.Count -or $P.AppxPackages -like 'Get-AppxPackage failed*') -and $Newest -and $Newest.Id -eq 8000) {
             Add-ALResult $R 'WARN' "Hypothesis $C" "the delivered policy carries an Appx (packaged app) rule collection and this Server Core installation lacks packaged-app support ($(if ($MissingAppx.Count) { "missing: $($MissingAppx -join ', ')" } else { $P.AppxPackages })). Test: set EnableAppxRules = `$false in the settings, run 2_AL_create_gpos.ps1 and 3_AL_set_mode.ps1 -Mode <current> -Refresh, then look for 8001 instead of 8000 (SERVER-2022.md, section 7)"
+        }
+        if ($Conv) { Add-ALPolicyCheckResults $R "delivered to $C" $Conv }
+        Add-ALPolicyStoreResults $R $C $Store
+        if ($Newest -and $Newest.Id -eq 8000 -and "$($Newest.Status)" -eq '1336') {
+            $StoreBad = @($R | Where-Object { $_.Check -eq "Policy store $C" -and $_.Status -eq 'FAIL' })
+            $Why = if ($Conv -and $Conv.Status -eq 'FAIL') { "the delivered rules cannot form a valid ACL - see the 'Policy rule' rows: fix the build and deploy again (1_AL_build_policy.ps1, then 2_AL_create_gpos.ps1, which stops on such a rule set)" }
+            elseif ($StoreBad.Count) { "the permissions of the policy store are damaged - see the 'Policy store' rows: compare the SDDL with a server that applies the policy and restore it" }
+            else { "neither the delivered rules ($(if ($Conv) { $Conv.Summary } else { 'none in the registry' })) nor the policy store permissions explain it on this evidence. Compare the update level ($($Store.Build).$($Store.Ubr)) with a server of the same version that applies the policy and patch first (the lab's Server Core 2022 DC applied this baseline at 20348.5761); then trace AppIdPolicyConverter.exe and the Application Identity svchost with Process Monitor during gpupdate /target:computer /force" }
+            Add-ALResult $R 'WARN' "Hypothesis $C" "status 1336 (the ACL structure is invalid): $Why (SERVER-2022.md, section 7, cause 5)"
         }
         foreach ($D in $P.Decisions) { Add-ALResult $R 'INFO' "Decision $C" "$($D.User) -> $(Split-Path $D.File -Leaf): $($D.Decision) ($($D.Rule))" }
         Add-ALGpResults $R $C $Gp (ConvertFrom-ALGpResult $Gp.GpresultXml $Gp.GpresultText) 'Any' $Cfg.AuditGpoName $Cfg.EnforceGpoName $GpFile

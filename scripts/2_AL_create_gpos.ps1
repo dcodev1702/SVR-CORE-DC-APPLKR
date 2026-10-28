@@ -14,6 +14,11 @@
     refresh). Safety: an existing GPO is backed up first (Outputs\<profile>\gpo-backups\<timestamp>, restorable with Restore-GPO), the
     rules are read back from the GPO and compared with the file, and the deployed files are recorded with their SHA-256 in
     <build>\deploy-<timestamp>.json. The AppLocker event logs of the servers in scope are enlarged to EventLogSizesMB.
+    Before anything is written, each deployable rule set is checked the way Application Identity converts it on a server (every
+    rule's SID, condition and exceptions as a conditional ACE; every collection against the 64 KB an ACL can hold). A rule set that
+    would not convert is rejected by every server with event 8000 (status 1336, the ACL structure is invalid) and nothing would be
+    enforced or audited, so the script STOPS on it unless -SkipPolicyCheck is given. The sizes are printed and recorded in the
+    deployment record.
 
 .PARAMETER SettingsFile
     Settings file to use. Default: AL-Settings.psd1 next to the script.
@@ -26,6 +31,9 @@
 
 .PARAMETER SkipLogSize
     Leave the AppLocker event log sizes on the servers as they are.
+
+.PARAMETER SkipPolicyCheck
+    Deploy even when the conversion check reports a FAIL (a rule set the servers would reject with event 8000). For tests only.
 
 .PARAMETER NoConfirm
     Skip the yellow Y/N prompt (automation). A non-interactive session without -NoConfirm stops before any change.
@@ -58,8 +66,8 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-26
-    Version  : 1.0
+    Date     : 2026-10-28
+    Version  : 1.1 (conversion check of both rule sets before the GPOs are written; -SkipPolicyCheck)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules and the AppLocker module;
                create/link GPOs and write SYSVOL; WinRM to the servers for the event log sizes.
     Changes  : domain - the two GPOs (rules, System Services, links); servers - AppLocker event log sizes.
@@ -73,6 +81,8 @@ param(
     [string]$OutputFolder,
     [string[]]$TargetOU,
     [switch]$SkipLogSize,
+    # Deploy even when a rule set would not convert on the servers (tests only)
+    [switch]$SkipPolicyCheck,
     # Skip the Y/N confirmation (automation); default: ask
     [switch]$NoConfirm
 )
@@ -96,6 +106,21 @@ try {
         [pscustomobject]@{ Mode = $Mode; Gpo = $Name; Existing = (Get-GPO -Name $Name -Server $Domain.PDC -ErrorAction SilentlyContinue); Xml = $Out; Sha256 = (Get-ALSha256 $Out); Summary = $Summary }
     }
     foreach ($P in $Plan) { Write-Host "$($P.Mode): $($P.Xml)`n  $($P.Summary)`n  GPO '$($P.Gpo)': $(if ($P.Existing) { "exists ($($P.Existing.Id)) - backed up, then updated" } else { 'does not exist - created' })" }
+
+    # The rules as Application Identity will convert them on the servers: one conditional ACE per rule, one ACL per collection, 64 KB
+    # each. A rule set that cannot convert is rejected by every server (event 8000, status 1336) - better to stop here.
+    foreach ($P in $Plan) {
+        $Doc = New-Object System.Xml.XmlDocument; $Doc.Load($P.Xml)
+        $Chk = Test-ALPolicyConvertible $Doc
+        $P | Add-Member -NotePropertyName Check -NotePropertyValue $Chk
+        Write-Host "  conversion check ($($P.Mode)): $($Chk.Status) - $($Chk.Summary); $($Chk.Largest)$(if (-not $Chk.Exact) { ' (sizes estimated)' })" -ForegroundColor $(if ($Chk.Status -eq 'OK') { 'Gray' } elseif ($Chk.Status -eq 'WARN') { 'Yellow' } else { 'Red' })
+        foreach ($Pr in @($Chk.Problems)) { Write-Host "    $($Pr.Severity) $($Pr.Collection)$(if ($Pr.Rule) { " '$($Pr.Rule)'" }): $($Pr.Problem)" -ForegroundColor $(if ($Pr.Severity -eq 'FAIL') { 'Red' } else { 'Yellow' }) }
+    }
+    $Broken = @($Plan | Where-Object { $_.Check.Status -eq 'FAIL' })
+    if ($Broken.Count) {
+        if (-not $SkipPolicyCheck) { throw "STOP: the $(@($Broken | ForEach-Object { $_.Mode }) -join ' and ') rules would not convert on the servers (AppLocker event 8000, status 1336: the ACL structure is invalid) - see the FAIL lines above. Nothing was changed. Fix the cause and build again (1_AL_build_policy.ps1; README, Appendix D), or run with -SkipPolicyCheck to deploy anyway." }
+        Write-Warning 'The conversion check FAILED and -SkipPolicyCheck is set: the servers may reject this rule set (event 8000, status 1336).'
+    }
 
     if (-not $WhatIfPreference) {
         Confirm-ALChange -NoConfirm:$NoConfirm -Action "create/update the AppLocker GPOs '$($Cfg.AuditGpoName)' and '$($Cfg.EnforceGpoName)'" -Detail @(
@@ -153,7 +178,7 @@ try {
                 Write-Host "  linked to $Ou (DISABLED)"
             }
         }
-        $Deployed.Add([ordered]@{ Mode = $P.Mode; Gpo = $P.Gpo; GpoId = "$($Gpo.Id)"; File = (Split-Path -Leaf $P.Xml); Sha256 = $P.Sha256; Rules = $Now; ComputerVersion = $Ver; Backup = $(if ($Backup) { "$($Backup.Folder) (backup ID $($Backup.BackupId))" } else { '' }) })
+        $Deployed.Add([ordered]@{ Mode = $P.Mode; Gpo = $P.Gpo; GpoId = "$($Gpo.Id)"; File = (Split-Path -Leaf $P.Xml); Sha256 = $P.Sha256; Rules = $Now; Conversion = "$($P.Check.Status): $($P.Check.Summary)"; ComputerVersion = $Ver; Backup = $(if ($Backup) { "$($Backup.Folder) (backup ID $($Backup.BackupId))" } else { '' }) })
     }
     if ($Deployed.Count) {
         $Record = Join-Path $Build "deploy-$($Cfg.Stamp).json"

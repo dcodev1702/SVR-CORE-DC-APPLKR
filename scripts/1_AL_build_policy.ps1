@@ -20,6 +20,9 @@
       6. copies the results to <root>\Outputs\<profile>\<timestamp>\ with the exceptions from step 3 and the SHA-256 of every rule
          file recorded in build-info.json, removes the temporary folders, and warns about any Windows Server version in the target OUs
          (from AD) that no scanned server runs
+      7. checks each rule file the way Application Identity converts it on a server (one conditional ACE per rule, one ACL per
+         collection, 64 KB each) and prints the size of every collection; a rule set that would not convert is reported (and recorded
+         in build-info.json) - 2_AL_create_gpos.ps1 stops on it
     Outputs\<profile>\latest.txt names the newest build; 2_AL_create_gpos.ps1 deploys it.
     The script may run on the reference server itself (the toolkit on a DC): that server is then reached in this process instead of
     over WinRM, with the same steps and the same temporary folder. Every other server is still reached over WinRM.
@@ -69,8 +72,9 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-27
-    Version  : 1.2 (ExtraReferenceServers: merged scans for DCs of more than one Windows Server version; runs on the reference server itself)
+    Date     : 2026-10-28
+    Version  : 1.3 (conversion check of the rule files; 1.2: ExtraReferenceServers, merged scans for DCs of more than one Windows
+               Server version, runs on the reference server itself)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT ActiveDirectory module; WinRM administrator on the servers; FullLanguage
                mode and an execution policy that runs unsigned scripts on the reference server and every extra reference server
                (AaronLocker's scripts are not signed).
@@ -303,6 +307,17 @@ try {
         foreach ($R in $Rules) { $N = Add-ALPathExceptions $R.FullName $Plan.Exceptions; Write-Host "  $($R.Name): exceptions added to $N rule(s)" }
     }
 
+    # 7. how the rules will convert on the servers (one conditional ACE per rule, one ACL per collection, 64 KB each): the size of
+    # every collection, and anything Application Identity could not convert (it would reject the whole policy: event 8000, status 1336)
+    $Checks = @(foreach ($R in $Rules) {
+            $Doc = New-Object System.Xml.XmlDocument; $Doc.Load($R.FullName)
+            $C = Test-ALPolicyConvertible $Doc
+            Write-Host "  $($R.Name): conversion check $($C.Status) - $($C.Summary); $($C.Largest)$(if (-not $C.Exact) { ' (sizes estimated)' })" -ForegroundColor $(if ($C.Status -eq 'OK') { 'Gray' } elseif ($C.Status -eq 'WARN') { 'Yellow' } else { 'Red' })
+            foreach ($Pr in @($C.Problems)) { Write-Host "    $($Pr.Severity) $($Pr.Collection)$(if ($Pr.Rule) { " '$($Pr.Rule)'" }): $($Pr.Problem)" -ForegroundColor $(if ($Pr.Severity -eq 'FAIL') { 'Red' } else { 'Yellow' }) }
+            [ordered]@{ File = $R.Name; Status = $C.Status; Summary = $C.Summary; Largest = $C.Largest; Problems = @($C.Problems | ForEach-Object { "$($_.Severity) $($_.Collection) '$($_.Rule)': $($_.Problem)" }) }
+        })
+    if (@($Checks | Where-Object { $_.Status -eq 'FAIL' }).Count) { Write-Warning 'A rule file would not convert on the servers (AppLocker event 8000, status 1336: the ACL structure is invalid). 2_AL_create_gpos.ps1 stops on it: review the FAIL lines, fix the cause (README, Appendix D) and build again.' }
+
     # Windows Server versions in scope that no scanned server runs: the folders only that version makes user-writable stay allowed there
     $ScannedBuilds = @(@($Ref) + $ExtraRefs | ForEach-Object { $_.Info.Build })
     $NotScanned = @(foreach ($T in $Targets) {
@@ -322,6 +337,7 @@ try {
             Exceptions = $Plan.Exceptions; CheckedOn = $Checked; NotChecked = $Unchecked
         }
         Rules = @($Rules | ForEach-Object { [ordered]@{ File = $_.Name; Sha256 = (Get-ALSha256 $_.FullName) } })
+        Conversion = @($Checks)
         Settings = $Cfg.SettingsFile; PowerShell = "$($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Dest 'build-info.json') -Encoding UTF8
     # Only the folder name: the whole tree can be moved or copied to another computer
