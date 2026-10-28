@@ -61,6 +61,16 @@
     # carries an Appx collection may fail to convert (AppLocker event 8000; 7_AL_diagnose.ps1, SERVER-2022.md section 7).
     EnableAppxRules   = $true
 
+    # Allow-rule exceptions that are collapsed into one: every user-writable folder the scan found under such a root is replaced by
+    # the root itself as the one exception, so the rule only gets stricter. AppLocker converts a rule collection into ONE access
+    # control list of at most 64 KB, one entry per rule, and the %WINDIR%\* rule carries every user-writable folder as part of its
+    # entry. On a DC, SYSVOL holds one such folder per GPO whose creator or delegated editor is not an administrator - hundreds in a
+    # large domain - and the whole policy is then rejected by every DC (event 8000, status 1336). Non-admins never run from a DC's
+    # local SYSVOL folder; logon scripts come through \\<domain>\SYSVOL and \\<domain>\NETLOGON, which stay allowed. The build prints
+    # what it collapsed, and the conversion check names the folders that make a rule big: add others here when needed
+    # (%WINDIR%\CCM\* ...), or list their writers in KnownAdmins when they are an administrators group. Core Windows folders are refused.
+    CollapseExceptionsUnder = @('%WINDIR%\SYSVOL\*')
+
     # AppLocker logs allowed executions too; the 1 MB default wraps in minutes on a busy server. Sizes in MB (1-4096).
     EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 100; 'Packaged app-Execution' = 100; 'Packaged app-Deployment' = 100 }
 }
