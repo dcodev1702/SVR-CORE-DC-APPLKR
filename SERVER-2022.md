@@ -369,7 +369,7 @@ Then check that the DC works (`dcdiag`, SYSVOL and NETLOGON, logons, Group Polic
 >
 > - The script disables the Enforce link first, then enables the Audit link, and runs `gpupdate` twice. Once the DC has refreshed, nothing is blocked any more; what Enforce would block is logged as 8003 / 8006 instead. `-WhatIf` shows the two link changes without making them.
 > - Elevated administrators are always allowed, so Enforce cannot block the rollback itself. A **non-elevated** session cannot run the toolkit from `C:\SVR-CORE-DC-APPLKR`: in Enforce that folder is not an allowed path for non-admins. At the DC's console, `whoami /groups` must show *High Mandatory Level*. A remote session from the PAW is always elevated.
-> - The STIG item is **Open** again until you return to Enforce. To remove the AppLocker rules entirely, use `-Mode Off` ([README, section 13](README.md#13-rollback)).
+> - The STIG item is **Open** again until you return to Enforce. To remove the AppLocker rules entirely, use `-Mode Off`; to delete the GPOs and reset the DCs, `C:\Admin` included, use `8_AL_reset.ps1` ([README, section 13](README.md#13-rollback)).
 
 ---
 

@@ -339,6 +339,27 @@ try {
     Assert 'deploy XML: Enforce source refused for Audit' (Throws { New-ALDeployXml -SourceXml $Xml -Mode Audit -DllRules $false -OutFile (Join-Path $Tmp 'e.xml') })
     (Get-Content -LiteralPath $Xml -Raw) -replace 'Type="Dll"', 'Type="ManagedInstaller"' | Set-Content -LiteralPath $Xml -Encoding Unicode
     Assert 'deploy XML: ManagedInstaller collection refused' (Throws { New-ALDeployXml -SourceXml $Xml -Mode Enforce -DllRules $false -OutFile (Join-Path $Tmp 'f.xml') })
+    # ---- gPLink parsing and the domain-wide link search (8_AL_reset.ps1)
+    $GpLinkValue = '[LDAP://cn={212A5547-480D-42EA-9F5F-7B2A3A66FA21},cn=policies,cn=system,DC=holonet,DC=local;0][LDAP://cn={356e8bbe-4180-4cb1-bcb1-5ef6e1263a39},cn=policies,cn=system,DC=holonet,DC=local;1][LDAP://CN={6AC1786C-016F-11D2-945F-00C04fB984F9},CN=Policies,CN=System,DC=holonet,DC=local;2]'
+    $Parsed = @(ConvertFrom-ALGpLink $GpLinkValue)
+    Assert 'gPLink: three links, GUIDs in upper case, options and enabled state' ($Parsed.Count -eq 3 -and $Parsed[0].Guid -eq '{212A5547-480D-42EA-9F5F-7B2A3A66FA21}' -and $Parsed[0].Enabled -and $Parsed[1].Guid -eq '{356E8BBE-4180-4CB1-BCB1-5EF6E1263A39}' -and -not $Parsed[1].Enabled -and $Parsed[2].Options -eq 2 -and $Parsed[2].Enabled) (($Parsed | ForEach-Object { "$($_.Guid);$($_.Options)" }) -join ' ')
+    Assert 'gPLink: empty, blank-space and malformed values give nothing' (@(ConvertFrom-ALGpLink '').Count -eq 0 -and @(ConvertFrom-ALGpLink ' ').Count -eq 0 -and @(ConvertFrom-ALGpLink '[LDAP://cn=x;abc]').Count -eq 0)
+    function Get-ADRootDSE { [CmdletBinding()] param([string]$Server) [pscustomobject]@{ configurationNamingContext = 'CN=Configuration,DC=contoso,DC=com' } }
+    function Get-ADObject { [CmdletBinding()] param([string]$SearchBase, [string]$LDAPFilter, [string[]]$Properties, [string]$Server) $Global:ALTestSearches += "$SearchBase|$LDAPFilter"; @($Global:ALTestLinked | Where-Object { $_.DistinguishedName -like "*$SearchBase" }) }
+    $Global:ALTestSearches = @()
+    $Global:ALTestLinked = @(
+        [pscustomobject]@{ DistinguishedName = 'OU=Domain Controllers,DC=contoso,DC=com'; gPLink = $GpLinkValue },
+        [pscustomobject]@{ DistinguishedName = 'CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=contoso,DC=com'; gPLink = '[LDAP://cn={212A5547-480D-42EA-9F5F-7B2A3A66FA21},cn=policies,cn=system,DC=contoso,DC=com;3]' })
+    $LinkDomain = [pscustomobject]@{ DN = 'DC=contoso,DC=com'; PDC = 'pdc.contoso.com' }
+    $Found = @(Get-ALGpoLinkTargets '212a5547-480d-42ea-9f5f-7b2a3a66fa21' $LinkDomain)
+    Assert 'link search: domain partition and sites searched with the GUID in braces' (($Global:ALTestSearches -join ' ') -eq 'DC=contoso,DC=com|(gPLink=*{212A5547-480D-42EA-9F5F-7B2A3A66FA21}*) CN=Sites,CN=Configuration,DC=contoso,DC=com|(gPLink=*{212A5547-480D-42EA-9F5F-7B2A3A66FA21}*)') ($Global:ALTestSearches -join ' ')
+    Assert 'link search: the OU link (enabled) and the site link (disabled, enforced) are found' ($Found.Count -eq 2 -and $Found[0].Target -eq 'OU=Domain Controllers,DC=contoso,DC=com' -and $Found[0].Enabled -and -not $Found[0].Enforced -and $Found[1].Target -like 'CN=Default-First-Site-Name,*' -and -not $Found[1].Enabled -and $Found[1].Enforced) (($Found | ForEach-Object { "$($_.Target);$($_.Enabled);$($_.Enforced)" }) -join ' / ')
+    $Global:ALTestSearches = @()
+    Assert 'link search: another GPO in the same gPLink is not reported for this one' (@(Get-ALGpoLinkTargets '{356E8BBE-4180-4CB1-BCB1-5EF6E1263A39}' $LinkDomain).Count -eq 1)
+    Assert 'link search: a GPO linked nowhere gives nothing' (@(Get-ALGpoLinkTargets '{00000000-0000-0000-0000-000000000001}' $LinkDomain).Count -eq 0)
+    Remove-Item Function:\Get-ADRootDSE, Function:\Get-ADObject
+    Remove-Variable -Name ALTestSearches, ALTestLinked -Scope Global
+
     # ---- this computer vs a server: Test-ALLocalComputer / Invoke-ALOn (the toolkit run on a DC itself)
     $CsInfo = Get-CimInstance Win32_ComputerSystem
     $MyFqdn = "$($CsInfo.DNSHostName).$($CsInfo.Domain)"

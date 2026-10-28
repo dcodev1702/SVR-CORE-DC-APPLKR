@@ -9,7 +9,7 @@
       - the confirmation gate: Confirm-ALChange (yellow Y/N, -NoConfirm, never hangs in a non-interactive session), Test-ALInteractive
       - results and evidence: New-ALResults, Add-ALResult, Write-ALResults (table + CSV + PASSED / FAILED line), Stop-ALTranscript
       - the domain and GPOs: Get-ALDomainInfo, Resolve-ALTargetOUs, Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
-        Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
+        ConvertFrom-ALGpLink, Get-ALGpoLinkTargets, Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
       - the servers and this computer: Get-ALLocalNames, Test-ALLocalComputer, Invoke-ALOn (a script block over WinRM, or in this
         process when the server is the computer the script runs on - the toolkit run on a DC itself)
       - Group Policy on the servers: $ALGpRefreshProbe and Invoke-ALGpRefresh (gpupdate with its output kept, gpresult as text and
@@ -394,6 +394,34 @@ function Backup-ALGpo($Gpo, $Cfg, $Domain) {
 function Get-ALLinkState($GpoId, [string]$Ou, $Domain) {
     $Link = (Get-GPInheritance -Target $Ou -Server $Domain.PDC).GpoLinks | Where-Object { $_.GpoId -eq $GpoId }
     if ($Link) { return [bool]$Link.Enabled } else { return $null }
+}
+
+# The links in a gPLink attribute value ([LDAP://cn={GUID},cn=policies,cn=system,DC=...;<options>]...): Guid ({UPPER CASE}), Dn,
+# Options (bit 1 = link disabled, bit 2 = enforced), Enabled
+function ConvertFrom-ALGpLink([string]$GpLink) {
+    foreach ($M in [regex]::Matches("$GpLink", '\[LDAP://([^;\]]+);(\d+)\]', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+        $Dn = $M.Groups[1].Value
+        $G = [regex]::Match($Dn, '\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}')
+        $Options = [int]$M.Groups[2].Value
+        [pscustomobject]@{ Guid = $(if ($G.Success) { $G.Value.ToUpper() } else { '' }); Dn = $Dn; Options = $Options; Enabled = (($Options -band 1) -eq 0) }
+    }
+}
+
+# Every domain, OU or site whose gPLink names a GPO - not only the target OUs: Target (DN), Enabled, Enforced. Searched in the domain
+# partition and under CN=Sites of the configuration partition (when it can be read).
+function Get-ALGpoLinkTargets($GpoId, $Domain) {
+    $Id = '{' + ("$GpoId".Trim('{}')).ToUpper() + '}'
+    $Bases = @($Domain.DN)
+    try { $Bases += 'CN=Sites,' + (Get-ADRootDSE -Server $Domain.PDC -ErrorAction Stop).configurationNamingContext } catch { }
+    $Seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($B in $Bases) {
+        foreach ($O in @(Get-ADObject -SearchBase $B -LDAPFilter "(gPLink=*$Id*)" -Properties gPLink -Server $Domain.PDC -ErrorAction Stop)) {
+            if (-not $Seen.Add("$($O.DistinguishedName)")) { continue }
+            foreach ($L in @(ConvertFrom-ALGpLink "$($O.gPLink)" | Where-Object { $_.Guid -eq $Id })) {
+                [pscustomobject]@{ Target = "$($O.DistinguishedName)"; Enabled = $L.Enabled; Enforced = (($L.Options -band 2) -ne 0) }
+            }
+        }
+    }
 }
 
 # The build that 2_AL_create_gpos.ps1 deploys: -OutputFolder, else the folder named in Outputs\<profile>\latest.txt, else the newest

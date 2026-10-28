@@ -78,13 +78,13 @@ Both GPOs also set **System Services → Application Identity = Automatic** (`Gp
 ```
 SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer, e.g. C:\SVR-CORE-DC-APPLKR
   README.md  SERVER-2022.md  THIRD-PARTY-NOTICES.md
-  scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_...  7_AL_diagnose.ps1
+  scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_...  7_...  8_AL_reset.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
                    GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
-  tests\           Test-AL.ps1 (230 unit tests, no network, both PowerShell editions; 236 with -BuildFolder)
+  tests\           Test-AL.ps1 (236 unit tests, no network, both PowerShell editions; 242 with -BuildFolder)
   images\          architecture diagram (spec, SVG, PNG)
   Outputs\<profile>\<timestamp>\        created by the scripts: rules, scan results, hashes, deploy records, GPO backups
   Logs\                                 created by the scripts: one transcript (+ CSV of results) per run
@@ -131,7 +131,7 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
 6. **Optional - no management computer in the DCs' domain:** copy the zip from the PAW to a DC and run the toolkit there. [SERVER-2022.md, *Before you start*](SERVER-2022.md#before-you-start-where-to-run-the-toolkit) has the commands (an administrators-only folder on the DC, the copy over WinRM, the hash check, bringing the results back).
 
 > [!TIP]
-> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 230 passed`.
+> Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 236 passed`.
 
 ---
 
@@ -181,6 +181,7 @@ Every script carries comment-based help: `Get-Help .\<script>.ps1 -Full` shows i
 | 8 | `3_AL_set_mode.ps1 -Mode Enforce -Refresh` | Disables Audit, enables Enforce, refreshes | domain (links) |
 | 9 | `6_AL_stig_check.ps1` | Per DC, the STIG item for its version (WN25-00-000080 / V-277992 or WN22-00-000080 / V-254245): status + values + evidence XML | read-only |
 | - | `7_AL_diagnose.ps1` | When a DC does not apply the policy (AppLocker event **8000**): the status decoded, service and driver, the AppLocker and packaged-app components, delivered vs effective policy, gpresult, Group Policy / AppID / service events; evidence files per DC. `-Local` runs it on the DC's own console | read-only |
+| - | `8_AL_reset.ps1` | Removes the deployment: backs up, unlinks and deletes both GPOs (links searched domain-wide); on every DC refreshes Group Policy, sets Application Identity and the AppLocker log sizes back to the Windows defaults (`-ClearLogs` exports and clears the logs first) and gives `C:\Admin` its inherited permissions back. `-WhatIf` shows the plan | domain (GPOs deleted, backups kept), DCs |
 
 Every script that changes something shows the change in **yellow** and asks `Continue? [Y/N]`; **`-NoConfirm`** skips the prompt for automation, a non-interactive session without `-NoConfirm` stops before changing anything, and **`-WhatIf`** shows the plan without changing anything. Every run writes a transcript to `Logs\`; the read-only checks also write their results table as CSV and exit with code 1 on a failure.
 
@@ -466,7 +467,7 @@ If nothing appears in step 2, leave `KnownAdmins` empty — even with ten accoun
 | Remove AppLocker entirely | `.\3_AL_set_mode.ps1 -Mode Off -Refresh -NoConfirm` — the rules are removed at the next refresh (the STIG item becomes a finding again) |
 | A GPO update went wrong | `Restore-GPO -BackupId <id> -Path <Outputs\<profile>\gpo-backups\<ts>>` (IDs are in the step 5 output and in `deploy-<ts>.json`) |
 | On a DC itself | Elevated administrators and SYSTEM are always allowed, so `gpupdate /force`, PowerShell and WinRM keep working |
-| Remove the GPOs | Set `Off`, let the DCs refresh, then `Remove-GPLink` for both and `Remove-GPO` |
+| Remove the GPOs and reset the DCs | `.\8_AL_reset.ps1 -WhatIf`, then `.\8_AL_reset.ps1 -ClearLogs` - backs up, unlinks and deletes both GPOs, refreshes the DCs, resets Application Identity, the AppLocker log sizes and the `C:\Admin` permissions; `-KeepGpos` only unlinks, `-KeepFolderPermissions` leaves `C:\Admin` alone. Undo: `Restore-GPO` from its backup, or deploy again (steps 3 to 6) |
 
 ---
 
@@ -542,6 +543,17 @@ Policy decisions in Enforce (`Test-AppLockerPolicy`, effective policy):
 | 9 | `dcdiag /q` | only the DFSREvent and SystemLog tests report events (SYSVOL replication warnings after the promotion of the same day, a Secure Boot certificate notice, an ETW publisher error); nothing AppLocker-related |
 
 On 2026-10-28, after a review that found no would-be-blocked event, the DC went to **Enforce**: `3_AL_set_mode -Mode Enforce -Refresh` PASSED, `4_AL_validate -Mode Enforce` PASSED, `6_AL_stig_check` **WN22-00-000080 / V-254245: NotAFinding**, 0 blocked events, `dcdiag` unchanged ([SERVER-2022.md, section 4](SERVER-2022.md#audit-then-enforce-the-stig-result-after-each-mode), with the STIG result after each mode). The event 8000 seen there in an earlier, unrecorded attempt did not recur ([SERVER-2022.md, section 7](SERVER-2022.md#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)).
+
+**2026-10-28 - `8_AL_reset.ps1`, then a new build to Audit, then a restart** (`DC22-2`, from Enforce):
+
+| Step | Result |
+|---|---|
+| `8_AL_reset -ClearLogs -WhatIf` | plan shown, nothing changed (checked before and after) |
+| `8_AL_reset -ClearLogs` | both GPOs backed up, unlinked and deleted; logs exported (99 + 53 events) and cleared, sizes back to 1052672 bytes; Application Identity Manual and stopped (Group Policy restored Manual itself when the GPO went away); `C:\Admin` inherited again, identical to its original permissions; effective policy empty |
+| `8_AL_reset` again | PASSED with nothing left to do |
+| Pre-flight, `0_AL_secure_folders -Fix`, `1_AL_build_policy`, `2_AL_create_gpos`, `3_AL_set_mode -Mode Audit -Refresh`, `4_AL_validate -Mode Audit` | all PASSED; two new GPOs; `C:\Admin\*` allowed; STIG item Open (expected in Audit) |
+| Restart | back in under a minute; after the boot `4_AL_validate -Mode Audit` and `7_AL_diagnose` PASSED, the 8001 came 2 minutes after the boot, no 8000, 0 would-be-blocked events |
+| `3_AL_set_mode -Mode Enforce -Refresh` after a review with no would-be-blocked event | PASSED; `4_AL_validate -Mode Enforce` and `7_AL_diagnose` PASSED; `6_AL_stig_check` **WN22-00-000080 / V-254245: NotAFinding**; 0 blocked events |
 
 ---
 
