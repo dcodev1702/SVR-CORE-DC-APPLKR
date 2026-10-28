@@ -117,6 +117,19 @@ try {
     Assert 'settings: empty GPO name refused' (Throws { Assert-ALSettings (With @{ AuditGpoName = '' }) 'x' })
     Assert 'settings: ReferenceServer FQDN accepted' (-not (Throws { Assert-ALSettings (With @{ ReferenceServer = 'dc01.contoso.com' }) 'x' } '*'))
     Assert 'settings: ReferenceServer with spaces/semicolons refused' (Throws { Assert-ALSettings (With @{ ReferenceServer = 'dc01; whoami' }) 'x' })
+    Assert 'settings: ReferenceServer PDC accepted' (-not (Throws { Assert-ALSettings (With @{ ReferenceServer = 'PDC' }) 'x' } '*'))
+    # ---- Resolve-ALReferenceServer: the PDC keyword is looked up once (the lookup mocked), an FQDN is used as given
+    function Get-ALPdcEmulator { $Global:ALTestPdcCalls++; if ($Global:ALTestPdcFail) { throw 'STOP: the PDC emulator of this computer''s domain could not be found (test)' }; 'dc01.contoso.com' }
+    $Global:ALTestPdcCalls = 0; $Global:ALTestPdcFail = $false
+    $CfgPdc = With @{ ReferenceServer = 'pdc' }
+    Assert 'reference server: PDC (any case) resolves to the PDC emulator, replaces the keyword, flags it' ((Resolve-ALReferenceServer $CfgPdc 6>$null) -eq 'dc01.contoso.com' -and $CfgPdc.ReferenceServer -eq 'dc01.contoso.com' -and $CfgPdc.ReferenceServerResolved -and $Global:ALTestPdcCalls -eq 1)
+    Assert 'reference server: resolved once - the FQDN is used as given afterwards' ((Resolve-ALReferenceServer $CfgPdc 6>$null) -eq 'dc01.contoso.com' -and $Global:ALTestPdcCalls -eq 1)
+    $CfgFqdn = With @{ ReferenceServer = 'dc22-2.holonet.local' }
+    Assert 'reference server: an FQDN is used as given and nothing is looked up; empty stays empty' ((Resolve-ALReferenceServer $CfgFqdn) -eq 'dc22-2.holonet.local' -and -not $CfgFqdn.ContainsKey('ReferenceServerResolved') -and (Resolve-ALReferenceServer (With @{ ReferenceServer = '' })) -eq '' -and $Global:ALTestPdcCalls -eq 1)
+    $Global:ALTestPdcFail = $true
+    Assert 'reference server: a failed lookup stops with the reason' (Throws { Resolve-ALReferenceServer (With @{ ReferenceServer = 'PDC' }) } 'STOP:*PDC emulator*')
+    Remove-Item Function:\Get-ALPdcEmulator
+    Remove-Variable -Name ALTestPdcCalls, ALTestPdcFail -Scope Global
     Assert 'settings: ExtraReferenceServers FQDNs accepted' (-not (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @('dc22-01.contoso.com', 'DC22-02') }) 'x' } '*'))
     Assert 'settings: ExtraReferenceServers missing, $null or empty entries = not set' (-not (Throws { Assert-ALSettings (Get-BaseCfg) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = $null }) 'x'; Assert-ALSettings (With @{ ExtraReferenceServers = @('') }) 'x' } '*'))
     foreach ($S in 'dc22; whoami', 'C:\x', '-dc22', 'dc22 .contoso.com') { Assert "settings: ExtraReferenceServers '$S' refused" (Throws { Assert-ALSettings (With @{ ExtraReferenceServers = @($S) }) 'x' }) }

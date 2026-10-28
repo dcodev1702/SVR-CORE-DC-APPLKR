@@ -84,7 +84,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
                    GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
-  tests\           Test-AL.ps1 (284 unit tests, no network, both PowerShell editions; 290 with -BuildFolder)
+  tests\           Test-AL.ps1 (289 unit tests, no network, both PowerShell editions; 295 with -BuildFolder)
   images\          architecture diagram (spec, SVG, PNG)
   Outputs\<profile>\<timestamp>\        created by the scripts: rules, scan results, hashes, deploy records, GPO backups
   Logs\                                 created by the scripts: one transcript (+ CSV of results) per run
@@ -143,7 +143,7 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 |---|---|---|
 | `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JSLC_AppLocker_AUDIT_Domain_Controller` / `JSLC_AppLocker_ENFORCE_Domain_Controller` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
-| `ReferenceServer` | FQDN of the DC the baseline is built on — **required before step 4**; set it to one of **your** DCs | `DC22-2.holonet.local` (the lab's Server Core 2022 DC; the Server Core 2025 lab DC is `DC25-1.skynet-home.local`) |
+| `ReferenceServer` | The DC the baseline is built on. `PDC` = the PDC emulator of the domain the scripts run in, found at run time (pre-flight and the build print which DC it is), so one settings file serves every domain and enclave. Or the FQDN of one of **your** DCs; another server class needs an FQDN in its own settings file | `PDC` |
 | `ExtraReferenceServers` | DCs of **another Windows Server version** in scope, one per version (e.g. a Server 2022 DC next to 2025 DCs). The build scans them too and merges every user-writable folder and denied tool they find: stricter only ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) | empty |
 | `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
 | `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
@@ -199,7 +199,7 @@ Already done in [section 4](#4-bring-the-repository-into-the-disconnected-networ
 
 ### Step 2 — Pre-flight
 
-Set `ReferenceServer` (and `TargetOUs` if not the DCs) in `AL-Settings.psd1`. If your organisation has its own administrators groups, survey the OU that holds your administrator accounts first — it writes nothing and shows which groups they belong to; [section 11](#11-who-counts-as-an-administrator) says what to do with the result:
+`ReferenceServer` is `PDC` by default (the PDC emulator of the domain the scripts run in, found at run time); set it to an FQDN only for another server class, and set `TargetOUs` if not the DCs, in `AL-Settings.psd1`. If your organisation has its own administrators groups, survey the OU that holds your administrator accounts first — it writes nothing and shows which groups they belong to; [section 11](#11-who-counts-as-an-administrator) says what to do with the result:
 ```powershell
 .\0_AL_known_admins.ps1 -Path 'contoso.com/Domain Administration/Administration/Admin-User-Accounts/DA'
 ```
@@ -211,7 +211,9 @@ It must end with **`Pre-flight: PASSED`**. Fix every **FAIL**; read every **WARN
 
 | Output | Means | Do |
 |---|---|---|
-| `Reference server: not set` | `ReferenceServer` is empty | set it (any DC in scope) |
+| `Reference server: <dc> (the PDC emulator of this domain; ReferenceServer = PDC)` | the keyword was resolved | nothing; this DC is scanned by the build |
+| `Reference server` FAIL | `ReferenceServer` is `PDC` but the PDC emulator could not be found (not domain-joined, no AD access) | run on a domain-joined computer, or set an FQDN |
+| `Reference server: not set` | `ReferenceServer` is empty | set it (`PDC`, or any DC in scope) |
 | `Execution policy … AllSigned` (FAIL on the reference DC or an extra reference DC) | AaronLocker cannot run there | [section 3](#3-prerequisites) |
 | `Version <DC>` (WARN) | That DC runs a Windows Server version (or installation type) that no reference DC runs. The build scans only the reference DCs for user-writable folders, so a folder only that version makes writable would stay allowed | add a DC like it to `ExtraReferenceServers` ([SERVER-2022.md](SERVER-2022.md#dcs-of-both-versions)) |
 | `PowerShell 2.0 <DC>` (WARN) | The `PowerShell-V2` feature is installed (Server 2022): `powershell.exe -Version 2` runs without Constrained Language Mode. STIG WN22-00-000410 | remove it ([SERVER-2022.md, section 3](SERVER-2022.md#3-remove-powershell-20-from-the-2022-dcs)) |

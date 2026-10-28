@@ -11,10 +11,11 @@
     # Example: @('OU=MECM Servers,OU=Servers,DC=contoso,DC=com')
     TargetOUs         = @()
 
-    # REQUIRED before 1_AL_build_policy.ps1: the server the baseline is built ON (FQDN), e.g. 'dc01.contoso.com'. It must look like the
-    # servers in TargetOUs (same roles, same software, the MECM client and Nessus Agent if they have them) - for the Domain Controllers OU,
-    # any DC (the PDC emulator is a good choice). The rules depend on what is on its disk. (Build one policy per server class.)
-    ReferenceServer   = '<YOUR DC FQDN GOES HERE>'
+    # The server the baseline is built ON. 'PDC' = the PDC emulator of the domain the scripts run in, found at run time (no name to edit
+    # per domain or enclave; pre-flight and the build print which DC it is). Or an FQDN, e.g. 'dc01.contoso.com'. It must look like the
+    # servers in TargetOUs (same roles, same software, the MECM client and Nessus Agent if they have them) - for the Domain Controllers OU
+    # any DC. The rules depend on what is on its disk. (Another server class: its own settings file with an FQDN.)
+    ReferenceServer   = 'PDC'
 
     # Servers in scope that run ANOTHER Windows Server version than ReferenceServer (FQDNs), one per version - e.g. a Server 2022 DC next
     # to Server 2025 DCs: @('dc22-01.contoso.com'). 1_AL_build_policy.ps1 scans each one too and merges every user-writable folder and

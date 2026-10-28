@@ -96,7 +96,7 @@ try {
     $Domain = Get-ALDomainInfo
     $Folders = @($Cfg.SecureFolders | Where-Object { $_ })
     if (-not $Folders.Count) { throw 'STOP: no folders - set SecureFolders in the settings or pass -Folder.' }
-    if (-not $ComputerName) { $ComputerName = @($Cfg.ReferenceServer | Where-Object { $_ }) + (Get-ALTargetComputers (Resolve-ALTargetOUs $Cfg $Domain) $Domain) }
+    if (-not $ComputerName) { $ComputerName = @((Resolve-ALReferenceServer $Cfg) | Where-Object { $_ }) + (Get-ALTargetComputers (Resolve-ALTargetOUs $Cfg $Domain) $Domain) }
     $ComputerName = @($ComputerName | Where-Object { $_ } | Sort-Object -Unique)
     if (-not $ComputerName.Count) { throw 'STOP: no servers - none in the target OUs, no ReferenceServer and no -ComputerName.' }
 
