@@ -31,11 +31,13 @@
     # scope and never stops on what it finds: an entry a non-admin can change is left out of the policy, and items inside it that a
     # non-admin can change become exceptions - so the policy never allows them (README, "C:\Admin"). 0_AL_pre-flight.ps1 warns ahead of
     # time; 4_AL_validate.ps1 fails only if a DC still allows such an item. Never add C:\Temp, C:\Sysmon, a user profile or a writable share.
-    ExtraAllowedPaths = @('C:\Admin\*')
+    #ExtraAllowedPaths = @('C:\Admin\*')
+    ExtraAllowedPaths = @()
 
     # Folders that 0_AL_secure_folders.ps1 creates (when missing) administrators-only on every server in scope. An existing folder is only
     # reported - its permissions are replaced only with -Fix. Every ExtraAllowedPaths folder that you create yourself (C:\Admin) belongs here.
-    SecureFolders     = @('C:\Admin')
+    #SecureFolders     = @('C:\Admin')
+    SecureFolders     = @()
 
     # Groups (DOMAIN\Name or SID) that are administrators in your organisation although they are not in the built-in Administrators group,
     # e.g. 'CONTOSO\Tier0-Server-Admins'. Their write access does not count as "user-writable" - in AaronLocker's scan and in the
@@ -60,7 +62,7 @@
     # Packaged app (Appx) rules: AaronLocker's default rule allows every signed packaged app; not required by the STIG items. $false empties
     # the Appx collection (NotConfigured) in both GPOs - for Server Core installations without packaged-app support, where a policy that
     # carries an Appx collection may fail to convert (AppLocker event 8000; 7_AL_diagnose.ps1, SERVER-2022.md section 7).
-    EnableAppxRules   = $true
+    EnableAppxRules   = $false
 
     # Allow-rule exceptions that are collapsed into one: every user-writable folder the scan found under such a root is replaced by
     # the root itself as the one exception, so the rule only gets stricter. AppLocker converts a rule collection into ONE access
