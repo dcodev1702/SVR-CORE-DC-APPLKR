@@ -24,6 +24,11 @@
       - KnownAdmins: Test-ALNeverAdmin, Test-ALBuiltInAdminSid, Split-ALCanonicalName, ConvertTo-ALLdapFilterValue,
         Get-ALKnownAdminEntry, ConvertTo-ALArrayLiteral
       - the toolkit: Import-ALModule, Test-ALModule (both PowerShell editions), Test-ALAccessChk, Get-ALPeMachine, Get-ALSha256
+      - the policy conversion check (the rules as Application Identity converts them - one conditional ACE per rule, one ACL per
+        collection, 64 KB each): ConvertTo-ALFqbnVersion, ConvertTo-ALConditionExpression, ConvertTo-ALRuleAce, Test-ALSddlNative,
+        Get-ALSddlSupport, Test-ALPolicyConvertible, Add-ALPolicyCheckResults, Get-ALStatusHint (what a Status of event 8000 points at)
+      - the policy store on a server: $ALPolicyStoreProbe (the converter task, the permissions of the AppLocker folder and keys, the
+        compiled <Collection>.AppLocker files, the collections delivered), Add-ALPolicyStoreResults
     Every function is documented where it is defined. The logic here is covered by tests\Test-AL.ps1 (no network, no domain).
 
 .INPUTS
@@ -40,8 +45,9 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-27
-    Version  : 1.2 (gpupdate / gpresult helpers; EnableAppxRules; scripts run on a server itself without WinRM to itself)
+    Date     : 2026-10-28
+    Version  : 1.3 (policy conversion check against the 64 KB ACL limit, the policy store probe; 1.2: gpupdate / gpresult helpers,
+               EnableAppxRules, scripts run on a server itself without WinRM to itself)
     Requires : Windows PowerShell 5.1 or PowerShell 7. ASCII-only source. Modules are loaded on demand by Import-ALModule.
     Changes  : nothing by itself; the step scripts decide what is changed.
 #>
@@ -759,6 +765,443 @@ function Get-ALPolicyMismatch([xml]$Policy, [string]$Mode, [bool]$DllRules, [boo
     }
 }
 
+# ---- The policy conversion check -----------------------------------------------------------------------------------------------------
+# Application Identity turns every rule collection into ONE security descriptor: each rule is one conditional access control entry
+# (allow = XA, deny = XD, the rule's SID, and the rule condition on the APPID://PATH, APPID://FQBN or APPID://SHA256HASH attribute
+# of the file - Microsoft, "AppLocker processes and interactions"). An ACL and a single ACE each carry their size in a 16-bit field,
+# so neither can exceed 65,535 bytes: a collection, or one rule with its exceptions, that compiles beyond that cannot form a valid
+# ACL, and the converter reports event 8000 with status 1336 (ERROR_INVALID_ACL, "The access control list (ACL) structure is
+# invalid"). These helpers rebuild the conditional ACE of every rule the way Windows documents it, compile it with Windows' own
+# SDDL parser when they run on Windows (ConvertStringSecurityDescriptorToSecurityDescriptor, the parser behind AddConditionalAce)
+# and measure the result against the limits. Where that parser is not available, or does not accept a form, the sizes are
+# estimated from the binary token layout of conditional expressions (MS-DTYP 2.4.4.17) and reported as estimates.
+$script:ALAclMaxBytes = 65535          # an ACL and an ACE each hold their size in a WORD
+$script:ALAclWarnPercent = 75          # WARN from this share of the limit
+$script:ALAceFixedBytes = 8            # ACE header (4) + access mask (4); the SID and the condition follow
+$script:ALConverterExtraBytes = 40     # two plain ACEs the converter adds for app containers (seen in the Exe policy of Windows 10)
+$script:ALExistsWord = 'Exists'        # the keyword the SDDL parser of this computer accepts (Get-ALSddlSupport may lower it)
+
+# A file version as AppLocker's BinaryVersionRange writes it ('10.0.19041.1'; '*' = no bound) packed into the 64-bit number a fully
+# qualified binary name carries (16 bits per part; a missing or '*' part is 0, or 65535 with -High for an upper bound). $null for
+# '*' or empty; a problem text (a string, not a number) for anything else.
+function ConvertTo-ALFqbnVersion([string]$Version, [switch]$High) {
+    $V = "$Version".Trim()
+    if ($V -eq '' -or $V -eq '*') { return $null }
+    $Parts = @($V -split '\.')
+    if ($Parts.Count -gt 4) { return "the version '$V' has more than four parts" }
+    [uint64]$N = 0
+    for ($I = 0; $I -lt 4; $I++) {
+        $Text = if ($I -lt $Parts.Count) { "$($Parts[$I])".Trim() } else { '*' }
+        if ($Text -eq '*') { $Text = if ($High) { '65535' } else { '0' } }
+        $P = 0
+        if (-not [int]::TryParse($Text, [ref]$P) -or $P -lt 0 -or $P -gt 65535) { return "the version '$V' is not up to four numbers from 0 to 65535" }
+        $N = $N * 65536 + [uint64]$P
+    }
+    return $N
+}
+
+# The conditional expression of one AppLocker condition element (FilePathCondition, FilePublisherCondition or FileHashCondition) as
+# Application Identity compiles it: Text (the SDDL form), Bytes (estimated size of its binary form: an attribute name or a string is
+# 5 bytes + 2 per character, an octet string 5 + 1 per byte, a 64-bit integer 11, a composite 5 + its members, every operator 1; a
+# fully qualified binary name is taken as a composite of a string and an integer) and Problems (what the converter cannot express:
+# an empty path, a quotation mark or a control character in a string, a malformed hash or version range).
+function ConvertTo-ALConditionExpression([System.Xml.XmlElement]$Condition) {
+    $Problems = New-Object System.Collections.Generic.List[string]
+    $Text = ''; [int64]$Bytes = 0
+    $Exists = $script:ALExistsWord
+    switch ($Condition.LocalName) {
+        'FilePathCondition' {
+            $Path = "$($Condition.GetAttribute('Path'))"
+            if ($Path.Trim() -eq '') { $Problems.Add('the path is empty') }
+            elseif ($Path -match '["\x00-\x1F]') { $Problems.Add("the path contains a quotation mark or a control character ($Path)") }
+            $Upper = $Path.ToUpperInvariant()
+            $Text = 'APPID://PATH Contains "' + $Upper + '"'
+            $Bytes = (5 + 2 * 12) + (5 + 2 * $Upper.Length) + 1
+        }
+        'FilePublisherCondition' {
+            $Pub = "$($Condition.GetAttribute('PublisherName'))"; $Prod = "$($Condition.GetAttribute('ProductName'))"; $Bin = "$($Condition.GetAttribute('BinaryName'))"
+            if ($Pub.Trim() -eq '') { $Problems.Add('the publisher name is empty') }
+            $Name = "$Pub\$Prod\$Bin"
+            if ($Name -match '["\x00-\x1F]') { $Problems.Add("the publisher, product or file name contains a quotation mark or a control character ($Name)") }
+            $Range = $Condition.SelectSingleNode('BinaryVersionRange')
+            $LowText = if ($Range) { "$($Range.GetAttribute('LowSection'))" } else { '*' }
+            $HighText = if ($Range) { "$($Range.GetAttribute('HighSection'))" } else { '*' }
+            $Low = ConvertTo-ALFqbnVersion $LowText
+            $HighV = ConvertTo-ALFqbnVersion $HighText -High
+            if ($Low -is [string]) { $Problems.Add($Low); $Low = $null }
+            if ($HighV -is [string]) { $Problems.Add($HighV); $HighV = $null }
+            if ($null -ne $Low -and $null -ne $HighV -and $Low -gt $HighV) { $Problems.Add("the version range $LowText - $HighText is reversed") }
+            $LowNum = if ($null -eq $Low) { [uint64]0 } else { $Low }
+            $Text = "($Exists APPID://FQBN) && (APPID://FQBN >= {`"$Name`", $LowNum})"
+            $Bytes = 2 * (5 + 2 * 12) + 1 + (5 + (5 + 2 * $Name.Length) + 11) + 1 + 1
+            if ($null -ne $HighV) { $Text += " && (APPID://FQBN <= {`"$Name`", $HighV})"; $Bytes += (5 + 2 * 12) + (5 + (5 + 2 * $Name.Length) + 11) + 1 + 1 }
+        }
+        'FileHashCondition' {
+            $Hashes = @($Condition.SelectNodes('FileHash'))
+            if (-not $Hashes.Count) { $Problems.Add('the hash condition holds no hash') }
+            $Items = New-Object System.Collections.Generic.List[string]
+            foreach ($H in $Hashes) {
+                $Data = "$($H.GetAttribute('Data'))".Trim(); $HType = "$($H.GetAttribute('Type'))"
+                if ($HType -ne 'SHA256' -or $Data -notmatch '^0[xX][0-9A-Fa-f]{64}$') { $Problems.Add("the hash '$Data' ($HType) is not a SHA-256 hash of 64 hex digits after 0x") }
+                $Hex = ($Data -replace '^0[xX]', '').ToLowerInvariant()
+                $Items.Add('#' + $Hex)
+                $Bytes += 5 + [int][math]::Ceiling($Hex.Length / 2)
+            }
+            $Text = "($Exists APPID://SHA256HASH) && (APPID://SHA256HASH Any_of {" + ($Items -join ', ') + '})'
+            $Bytes += 2 * (5 + 2 * 18) + 1 + 5 + 1 + 1
+        }
+        default { $Problems.Add("unknown condition element <$($Condition.LocalName)>"); $Text = "($Exists APPID://PATH)"; $Bytes = 5 + 2 * 12 + 1 }
+    }
+    [pscustomobject]@{ Text = $Text; Bytes = $Bytes; Problems = $Problems.ToArray() }
+}
+
+# The conditional ACE of one AppLocker rule (FilePathRule, FilePublisherRule or FileHashRule with its exceptions) as Application
+# Identity compiles it: Sddl - (XA;;0x1200a0;;;<SID>;((<condition>) && !(<exception>) ...)), XD for a deny rule, 0x1200a0 =
+# execute, read attributes, read control, synchronize - Bytes (estimated size of the ACE: header, access mask, SID, the 'artx'
+# signature and the expression, padded to 4), Exceptions (count), Deny, Sid and Problems.
+function ConvertTo-ALRuleAce([System.Xml.XmlElement]$Rule) {
+    $Problems = New-Object System.Collections.Generic.List[string]
+    # A SID string: revision 1, an identifier authority, 1 to 15 sub-authorities; 8 bytes + 4 per sub-authority in binary form
+    $Sid = "$($Rule.GetAttribute('UserOrGroupSid'))".Trim()
+    $SidBytes = 12
+    if ($Sid -match '^S-1-(\d{1,10}|0x[0-9A-Fa-f]{1,12})((?:-\d{1,10}){1,15})$') { $SidBytes = 8 + 4 * ($Matches[2].Split('-').Length - 1) }
+    else { $Problems.Add("the SID '$Sid' is not a valid security identifier"); $Sid = 'S-1-1-0' }
+    $Action = "$($Rule.GetAttribute('Action'))"
+    if ($Action -notin 'Allow', 'Deny') { $Problems.Add("the action '$Action' is neither Allow nor Deny") }
+    $AceType = if ($Action -eq 'Deny') { 'XD' } else { 'XA' }
+    [int64]$Bytes = $script:ALAceFixedBytes + $SidBytes + 4
+    $Conds = @($Rule.SelectNodes('Conditions/*'))
+    if ($Conds.Count -ne 1) { $Problems.Add("$($Conds.Count) conditions (exactly one is expected)") }
+    $Main = New-Object System.Collections.Generic.List[string]
+    foreach ($C in $Conds) {
+        $E = ConvertTo-ALConditionExpression $C
+        $Main.Add("($($E.Text))"); $Bytes += $E.Bytes
+        foreach ($P in $E.Problems) { $Problems.Add($P) }
+    }
+    if (-not $Main.Count) { $Main.Add("($($script:ALExistsWord) APPID://PATH)"); $Bytes += 5 + 2 * 12 + 1 }
+    $Expr = $Main -join ' && '
+    $Bytes += $Main.Count - 1
+    $Ex = @($Rule.SelectNodes('Exceptions/*'))
+    foreach ($X in $Ex) {
+        $E = ConvertTo-ALConditionExpression $X
+        $Expr += " && !($($E.Text))"; $Bytes += $E.Bytes + 2
+        foreach ($P in $E.Problems) { $Problems.Add("exception: $P") }
+    }
+    $Bytes += (4 - ($Bytes % 4)) % 4
+    [pscustomobject]@{ Sddl = "($AceType;;0x1200a0;;;$Sid;($Expr))"; Bytes = $Bytes; Exceptions = $Ex.Count; Deny = ($AceType -eq 'XD'); Sid = $Sid; Problems = $Problems.ToArray() }
+}
+
+# Compiles an SDDL security descriptor string with Windows' own parser (ConvertStringSecurityDescriptorToSecurityDescriptor). Returns
+# Ok, Error (the Win32 code when it fails: 87 = the parameter is incorrect, 1336 = the ACL structure is invalid, 1337 = the SID is
+# invalid ...), Bytes (the binary security descriptor), Aces (the size in bytes of every ACE of its DACL) and DaclBytes. $null when
+# the parser is not available: not Windows, or the small helper type could not be compiled (ConstrainedLanguage).
+$script:ALSddlNative = $null
+function Test-ALSddlNative([string]$Sddl) {
+    if ($null -eq $script:ALSddlNative) {
+        $script:ALSddlNative = $false
+        if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+            try {
+                if (-not ('ALSddlNative' -as [type])) {
+                    Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ALSddlNative {
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr sd, out uint size);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr handle);
+    public static int Convert(string sddl, out byte[] bytes) {
+        IntPtr sd; uint size; bytes = null;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, out size)) { return Marshal.GetLastWin32Error(); }
+        try { bytes = new byte[size]; Marshal.Copy(sd, bytes, 0, (int)size); } finally { LocalFree(sd); }
+        return 0;
+    }
+}
+'@
+                }
+                $script:ALSddlNative = $true
+            }
+            catch { $script:ALSddlNative = $false }
+        }
+    }
+    if (-not $script:ALSddlNative) { return $null }
+    $T = 'ALSddlNative' -as [type]
+    $Bytes = $null
+    $Err = $T::Convert($Sddl, [ref]$Bytes)
+    if ($Err -ne 0) { return [pscustomobject]@{ Ok = $false; Error = [int]$Err; Bytes = $null; Aces = @(); DaclBytes = 0 } }
+    $Sd = [System.Security.AccessControl.RawSecurityDescriptor]::new($Bytes, 0)
+    $Aces = @(); $Dacl = 0
+    if ($Sd.DiscretionaryAcl) { $Aces = @($Sd.DiscretionaryAcl | ForEach-Object { [int]$_.BinaryLength }); $Dacl = [int]$Sd.DiscretionaryAcl.BinaryLength }
+    [pscustomobject]@{ Ok = $true; Error = 0; Bytes = $Bytes; Aces = $Aces; DaclBytes = $Dacl }
+}
+
+# What the SDDL parser of this computer accepts, tested once with a sample of each rule form: Native (a parser is available), Path /
+# Hash / Fqbn (that form compiles), ExistsWord (the spelling of the Exists operator it took). A form the parser does not accept is
+# only estimated - never reported as a failed rule.
+$script:ALSddlSupport = $null
+function Get-ALSddlSupport {
+    if ($script:ALSddlSupport) { return $script:ALSddlSupport }
+    $S = [pscustomobject]@{ Native = $false; Path = $false; Hash = $false; Fqbn = $false; ExistsWord = 'Exists' }
+    $Samples = [ordered]@{
+        Path = 'D:(XA;;0x1200a0;;;S-1-1-0;(APPID://PATH Contains "%WINDIR%\*"))'
+        Hash = 'D:(XA;;0x1200a0;;;S-1-1-0;((Exists APPID://SHA256HASH) && (APPID://SHA256HASH Any_of {#5bf6ccc91dd715e18d6769af97dd3ad6a15d2b70326e834474d952753118c670})))'
+        Fqbn = 'D:(XA;;0x1200a0;;;S-1-1-0;((Exists APPID://FQBN) && (APPID://FQBN >= {"O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US\MICROSOFT TEAMS\*", 0})))'
+    }
+    foreach ($K in @($Samples.Keys)) {
+        $Sample = $Samples[$K] -creplace 'Exists', $S.ExistsWord
+        $R = Test-ALSddlNative $Sample
+        if ($null -eq $R) { break }
+        $S.Native = $true
+        if (-not $R.Ok -and $K -ne 'Path' -and $S.ExistsWord -eq 'Exists') {
+            $R2 = Test-ALSddlNative ($Samples[$K] -creplace 'Exists', 'exists')
+            if ($R2 -and $R2.Ok) { $R = $R2; $S.ExistsWord = 'exists' }
+        }
+        if ($R.Ok) { $S.$K = $true }
+    }
+    $script:ALExistsWord = $S.ExistsWord
+    $script:ALSddlSupport = $S
+    return $S
+}
+
+# Checks an AppLocker policy the way Application Identity will convert it - before it is deployed (2_AL_create_gpos.ps1), as it sits
+# in a GPO (4_AL_validate.ps1) or as it was delivered to a server (7_AL_diagnose.ps1): every rule's SID, action, condition and
+# exceptions; the conditional ACE of every rule and its size; the size of every collection's ACL - exact when Windows' SDDL parser
+# is available and accepts the rule's form, estimated otherwise - against the 65,535-byte limit of an ACL and of an ACE (FAIL at or
+# above it, WARN from ALAclWarnPercent). Returns Status (OK / WARN / FAIL), Native, Exact, Summary (one phrase per collection),
+# Largest (the biggest rule), Collections (Type, Mode, Rules, Deny, Exceptions, Bytes, Percent, Exact, Largest, LargestBytes,
+# Status) and Problems (Severity, Collection, Rule, Id, Problem).
+function Test-ALPolicyConvertible([xml]$Policy) {
+    $Support = Get-ALSddlSupport
+    $Max = $script:ALAclMaxBytes
+    $Cols = New-Object System.Collections.Generic.List[object]
+    $Problems = New-Object System.Collections.Generic.List[object]
+    function Add-Problem([string]$Sev, [string]$Col, [string]$RuleName, [string]$Id, [string]$Text) { $Problems.Add([pscustomobject]@{ Severity = $Sev; Collection = $Col; Rule = $RuleName; Id = $Id; Problem = $Text }) }
+    $Ids = @{}
+    if (-not $Policy.AppLockerPolicy) { Add-Problem 'FAIL' '' '' '' 'not an AppLocker policy (no AppLockerPolicy element)' }
+    foreach ($Rc in @($Policy.SelectNodes('/AppLockerPolicy/RuleCollection'))) {
+        $Type = "$($Rc.GetAttribute('Type'))"; $Mode = "$($Rc.GetAttribute('EnforcementMode'))"
+        if ($Mode -eq '') { $Mode = 'NotConfigured' }
+        if ($Type -notin 'Exe', 'Dll', 'Script', 'Msi', 'Appx', 'ManagedInstaller') { Add-Problem 'FAIL' $Type '' '' "unknown rule collection type '$Type'" }
+        $Rules = @($Rc.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' })
+        $Aces = New-Object System.Collections.Generic.List[object]
+        $Deny = 0; $Exceptions = 0; $Exact = $true; $Broken = $false
+        foreach ($Rule in $Rules) {
+            $Name = "$($Rule.GetAttribute('Name'))"; $Id = "$($Rule.GetAttribute('Id'))"
+            $Guid = [guid]::Empty
+            if (-not [guid]::TryParse($Id, [ref]$Guid)) { Add-Problem 'WARN' $Type $Name $Id "the rule Id '$Id' is not a GUID" }
+            elseif ($Ids.ContainsKey($Id.ToLowerInvariant())) { Add-Problem 'WARN' $Type $Name $Id "duplicate rule Id (also used by $($Ids[$Id.ToLowerInvariant()])): Group Policy keeps only one of them" }
+            else { $Ids[$Id.ToLowerInvariant()] = "$Type/'$Name'" }
+            if ($Rule.LocalName -notin 'FilePathRule', 'FilePublisherRule', 'FileHashRule') { Add-Problem 'FAIL' $Type $Name $Id "unknown rule element <$($Rule.LocalName)>" }
+            $Ace = ConvertTo-ALRuleAce $Rule
+            foreach ($P in $Ace.Problems) { Add-Problem 'FAIL' $Type $Name $Id $P }
+            $EstBytes = [int64]$Ace.Bytes; $Bytes = $EstBytes; $IsExact = $false
+            $Form = switch ($Rule.LocalName) { 'FilePathRule' { 'Path' } 'FilePublisherRule' { 'Fqbn' } 'FileHashRule' { 'Hash' } default { '' } }
+            $Mixed = (@($Rule.SelectNodes('Exceptions/FilePublisherCondition')).Count -gt 0 -and -not $Support.Fqbn) -or (@($Rule.SelectNodes('Exceptions/FileHashCondition')).Count -gt 0 -and -not $Support.Hash)
+            if ($Support.Native -and $Form -and $Support.$Form -and -not $Mixed -and $Ace.Problems.Count -eq 0) {
+                $N = Test-ALSddlNative "D:$($Ace.Sddl)"
+                if ($N -and $N.Ok -and @($N.Aces).Count -eq 1) { $Bytes = [int64]$N.Aces[0]; $IsExact = $true }
+                elseif ($N -and -not $N.Ok) { Add-Problem 'FAIL' $Type $Name $Id "Windows' SDDL parser rejects the conditional ACE of this rule (error $($N.Error): $(ConvertTo-ALWin32Message $N.Error)); $($Ace.Exceptions) exception(s)"; $Broken = $true }
+            }
+            if (-not $IsExact) { $Exact = $false }
+            # The estimate decides too: it follows the binary layout, so a rule it puts beyond the limit is beyond it
+            if ($Bytes -gt $Max -or $EstBytes -gt $Max) { $Shown = [math]::Max($Bytes, $EstBytes); Add-Problem 'FAIL' $Type $Name $Id "this rule alone compiles to $($Shown.ToString('N0')) bytes, more than one ACE can hold ($($Max.ToString('N0'))); it has $($Ace.Exceptions) exception(s)$(if (-not $IsExact -or $EstBytes -gt $Bytes) { ' (estimated)' })"; $Broken = $true }
+            if ($Ace.Deny) { $Deny++ }
+            $Exceptions += $Ace.Exceptions
+            $Aces.Add([pscustomobject]@{ Name = $Name; Id = $Id; Bytes = $Bytes; Est = $EstBytes; Exact = $IsExact; Sddl = $Ace.Sddl; Deny = $Ace.Deny })
+        }
+        [int64]$Total = 0; [int64]$EstTotal = 0
+        if ($Rules.Count) {
+            $Total = 8 + $script:ALConverterExtraBytes
+            foreach ($A in $Aces) { $Total += $A.Bytes; $EstTotal += $A.Est }
+            $EstTotal += 8 + $script:ALConverterExtraBytes
+            # The whole collection as one ACL, for the exact DACL size (deny ACEs first, as the converter orders them)
+            if ($Exact -and -not $Broken -and $Support.Native) {
+                $All = 'D:' + ((@($Aces | Where-Object { $_.Deny }) + @($Aces | Where-Object { -not $_.Deny }) | ForEach-Object { $_.Sddl }) -join '')
+                $N = Test-ALSddlNative $All
+                if ($N -and $N.Ok) { $Total = [int64]$N.DaclBytes + $script:ALConverterExtraBytes }
+                elseif ($N -and -not $N.Ok) { Add-Problem 'FAIL' $Type '' '' "the $Type collection does not compile as one ACL although every rule does on its own (error $($N.Error): $(ConvertTo-ALWin32Message $N.Error)) - $($Rules.Count) rules, about $($Total.ToString('N0')) bytes"; $Broken = $true }
+            }
+        }
+        $Largest = $null
+        if ($Aces.Count) { $Largest = @($Aces | Sort-Object Bytes -Descending)[0] }
+        $Pct = if ($Rules.Count) { [math]::Round(100.0 * $Total / $Max, 1) } else { 0 }
+        $Status = 'OK'
+        if ($Rules.Count -and ($Total -gt $Max -or $EstTotal -gt $Max)) { $Shown = [math]::Max($Total, $EstTotal); if ($Shown -gt $Total) { $Total = $Shown }; Add-Problem 'FAIL' $Type '' '' "the $Type collection compiles to $($Shown.ToString('N0')) bytes, more than one ACL can hold ($($Max.ToString('N0'))): $($Rules.Count) rules, the largest '$($Largest.Name)' with $($Largest.Bytes.ToString('N0')) bytes$(if (-not $Exact -or $EstTotal -gt $Total) { ' (estimated)' })" }
+        elseif ($Rules.Count -and $Pct -ge $script:ALAclWarnPercent) { Add-Problem 'WARN' $Type '' '' "the $Type collection uses $Pct% of the 64 KB an ACL can hold ($($Total.ToString('N0')) bytes, $($Rules.Count) rules): add rules sparingly" }
+        $Cols.Add([pscustomobject]@{ Type = $Type; Mode = $Mode; Rules = $Rules.Count; Deny = $Deny; Exceptions = $Exceptions; Bytes = $Total; Percent = $Pct; Exact = ($Exact -and $Rules.Count -gt 0); Largest = $(if ($Largest) { $Largest.Name } else { '' }); LargestBytes = $(if ($Largest) { $Largest.Bytes } else { 0 }); Status = $Status })
+    }
+    foreach ($C in $Cols) {
+        $Own = @($Problems | Where-Object { $_.Collection -eq $C.Type })
+        if (@($Own | Where-Object { $_.Severity -eq 'FAIL' }).Count) { $C.Status = 'FAIL' } elseif (@($Own | Where-Object { $_.Severity -eq 'WARN' }).Count) { $C.Status = 'WARN' }
+    }
+    $Overall = 'OK'
+    if (@($Problems | Where-Object { $_.Severity -eq 'FAIL' }).Count) { $Overall = 'FAIL' } elseif (@($Problems | Where-Object { $_.Severity -eq 'WARN' }).Count) { $Overall = 'WARN' }
+    $Big = @($Cols | Where-Object { $_.Rules -gt 0 } | Sort-Object LargestBytes -Descending) | Select-Object -First 1
+    [pscustomobject]@{
+        Status      = $Overall
+        Native      = $Support.Native
+        Exact       = (@($Cols | Where-Object { $_.Rules -gt 0 -and -not $_.Exact }).Count -eq 0)
+        Summary     = (@($Cols | Sort-Object Type | ForEach-Object { "$($_.Type)=$($_.Mode) $($_.Rules) rule(s), $($_.Bytes.ToString('N0')) B ($($_.Percent)% of 64 KB$(if ($_.Rules -gt 0 -and -not $_.Exact) { ', estimated' }))" }) -join '; ')
+        Largest     = $(if ($Big) { "largest rule: $($Big.Type) '$($Big.Largest)' $($Big.LargestBytes.ToString('N0')) B" } else { 'no rules' })
+        Collections = $Cols.ToArray()
+        Problems    = $Problems.ToArray()
+    }
+}
+
+# Adds the rows of a conversion check to a results list: "Policy conversion <label>" (the collections with their sizes) and one
+# "Policy rule <label>" row per problem found
+function Add-ALPolicyCheckResults($List, [string]$Label, $Check) {
+    $How = if ($Check.Exact) { "sizes exact (compiled with Windows' SDDL parser)" } elseif ($Check.Native) { 'sizes partly estimated' } else { 'sizes estimated (no Windows SDDL parser here)' }
+    $Tail = if ($Check.Status -eq 'FAIL') { ' - Application Identity would reject this policy (event 8000, status 1336): fix the build before it is deployed' } elseif ($Check.Status -eq 'WARN') { ' - see the Policy rule rows' } else { '' }
+    Add-ALResult $List $Check.Status "Policy conversion $Label" "$($Check.Summary); $($Check.Largest); $How$Tail"
+    foreach ($P in @($Check.Problems)) { Add-ALResult $List $P.Severity "Policy rule $Label" "$($P.Collection)$(if ($P.Rule) { " '$($P.Rule)'" })$(if ($P.Id) { " ($($P.Id))" }): $($P.Problem)" }
+}
+
+# What the Status of AppLocker event 8000 points at, for the codes this toolkit knows; '' for any other
+function Get-ALStatusHint([object]$Code) {
+    $Text = "$Code".Trim(); $N = [int64]-1
+    if ($Text -match '^0[xX]([0-9A-Fa-f]{1,8})$') { $N = [Convert]::ToInt64($Matches[1], 16) } elseif ($Text -match '^-?\d{1,10}$') { $N = [int64]$Text }
+    if ($N -ge 2147942400 -and $N -le 2148007935) { $N -= 2147942400 }
+    switch ($N) {
+        1336 { return "the converted rules did not form a valid ACL - one collection or one rule with its exceptions beyond the 64 KB limit of an ACL or ACE, a rule the converter cannot express, or a damaged ACL on the policy store (4_AL_validate.ps1 rows 'Policy conversion', 'Policy store', 'Compiled policy'; 7_AL_diagnose.ps1; SERVER-2022.md section 7, cause 5)" }
+        { $_ -in 2, 3, 126 } { return 'a component of the installation is missing (7_AL_diagnose.ps1: Components)' }
+        1168 { return 'something the policy refers to does not exist on this installation (the Appx collection on Server Core: EnableAppxRules)' }
+        { $_ -in 13, 87 } { return "the policy content itself (4_AL_validate.ps1 rows 'Policy conversion' / 'Policy rule')" }
+        5 { return "the service cannot read or write its policy keys or files (4_AL_validate.ps1 row 'Policy store')" }
+    }
+    return ''
+}
+
+# ---- The policy store on a server --------------------------------------------------------------------------------------------------
+# Runs ON a server (read-only; through Invoke-ALOn, or & $ALPolicyStoreProbe on the server itself). For a conversion failure that
+# names an ACL or access, the state of AppLocker's policy store: Windows build and update level; the PolicyConverter scheduled
+# task (account, state, last run, result); the permissions of %windir%\System32\AppLocker, of every file in it, of
+# HKLM\SYSTEM\CurrentControlSet\Control\Srp, Srp\Gp and HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2 (SDDL, owner, canonical
+# order, inheritance, an allow entry for SYSTEM and for Administrators, read access for the Application Identity service account
+# through LOCAL SERVICE, SERVICE, Authenticated Users, Users or Everyone); the compiled policy files <Collection>.AppLocker (size,
+# time, the security descriptor they carry and its ACE count - the file holds a 4-byte signature and, at offset 16, the offset of
+# the descriptor); the collections Group Policy delivered (SrpV2: mode and rule count); the newest 8000 / 8001 event.
+$ALPolicyStoreProbe = {
+    $ErrorActionPreference = 'Continue'
+    $o = [ordered]@{}
+    $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $o.Computer = $env:COMPUTERNAME; $o.Build = [int]$cv.CurrentBuild; $o.Ubr = [int]$cv.UBR; $o.InstallType = "$($cv.InstallationType)"
+    $o.Task = $null; $o.TaskError = ''
+    try {
+        $t = Get-ScheduledTask -TaskPath '\Microsoft\Windows\AppID\' -TaskName 'PolicyConverter' -ErrorAction Stop
+        $i = $null; try { $i = $t | Get-ScheduledTaskInfo -ErrorAction Stop } catch { }
+        $o.Task = [pscustomobject]@{ Principal = "$($t.Principal.UserId)"; LogonType = "$($t.Principal.LogonType)"; State = "$($t.State)"; LastRun = $(if ($i -and $i.LastRunTime -and $i.LastRunTime.Year -gt 1999) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' }); LastResult = $(if ($i) { [int64]$i.LastTaskResult } else { [int64]-1 }) }
+    }
+    catch { $o.TaskError = $_.Exception.Message }
+    function Read-ALStoreAcl([string]$Path, [string]$Kind) {
+        $r = [ordered]@{ Path = $Path; Kind = $Kind; Exists = $false; Sddl = ''; Owner = ''; Canonical = $true; Protected = $false; SystemAllow = $false; SystemFull = $false; AdminsAllow = $false; ServiceRead = $false; Error = '' }
+        if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]$r }
+        $r.Exists = $true
+        try {
+            $a = Get-Acl -LiteralPath $Path -ErrorAction Stop
+            $r.Sddl = "$($a.Sddl)"; $r.Owner = "$($a.Owner)"; $r.Canonical = [bool]$a.AreAccessRulesCanonical; $r.Protected = [bool]$a.AreAccessRulesProtected
+            foreach ($rule in $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+                if ($rule.AccessControlType -ne 'Allow') { continue }
+                $sid = $rule.IdentityReference.Value
+                $rights = if ($Kind -eq 'RegistryKey') { [int64]$rule.RegistryRights } else { [int64]$rule.FileSystemRights }
+                $generic = ($rights -band 0x10000000) -ne 0
+                $full = $generic -or ($Kind -eq 'RegistryKey' -and ($rights -band 0xF003F) -eq 0xF003F) -or ($Kind -ne 'RegistryKey' -and ($rights -band 0x1F01FF) -eq 0x1F01FF)
+                $write = $full -or ($Kind -eq 'RegistryKey' -and ($rights -band 0x6) -ne 0) -or ($Kind -ne 'RegistryKey' -and ($rights -band 0x2) -ne 0) -or ($rights -band 0x40000000) -ne 0
+                $read = $full -or ($Kind -eq 'RegistryKey' -and ($rights -band 0x1) -ne 0) -or ($Kind -ne 'RegistryKey' -and ($rights -band 0x1) -ne 0) -or ($rights -band 0x80000000) -ne 0
+                if ($sid -eq 'S-1-5-18' -and $write) { $r.SystemAllow = $true }
+                if ($sid -eq 'S-1-5-18' -and $full) { $r.SystemFull = $true }
+                if ($sid -eq 'S-1-5-32-544' -and $write) { $r.AdminsAllow = $true }
+                if ($sid -in 'S-1-5-19', 'S-1-5-6', 'S-1-5-11', 'S-1-5-32-545', 'S-1-1-0' -and $read) { $r.ServiceRead = $true }
+            }
+        }
+        catch { $r.Error = $_.Exception.Message }
+        [pscustomobject]$r
+    }
+    $Folder = Join-Path $env:windir 'System32\AppLocker'
+    $Store = New-Object System.Collections.Generic.List[object]
+    $Store.Add((Read-ALStoreAcl $Folder 'Folder'))
+    foreach ($f in @(Get-ChildItem -LiteralPath $Folder -File -Force -ErrorAction SilentlyContinue)) { $Store.Add((Read-ALStoreAcl $f.FullName 'File')) }
+    foreach ($k in 'HKLM:\SYSTEM\CurrentControlSet\Control\Srp', 'HKLM:\SYSTEM\CurrentControlSet\Control\Srp\Gp', 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SrpV2') { $Store.Add((Read-ALStoreAcl $k 'RegistryKey')) }
+    $o.Store = $Store.ToArray()
+    $o.Compiled = @(foreach ($f in @(Get-ChildItem -LiteralPath $Folder -Filter '*.AppLocker' -File -Force -ErrorAction SilentlyContinue)) {
+            $c = [ordered]@{ File = $f.Name; Collection = $f.BaseName; Bytes = [int64]$f.Length; Modified = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'); Magic = ''; SdOffset = -1; SdParsed = $false; Aces = 0; DaclBytes = 0; Error = '' }
+            try {
+                $b = [IO.File]::ReadAllBytes($f.FullName)
+                if ($b.Length -ge 4) { $c.Magic = -join @(0..3 | ForEach-Object { if ($b[$_] -ge 32 -and $b[$_] -lt 127) { [char]$b[$_] } else { '.' } }) }
+                if ($b.Length -ge 20) {
+                    $off = [BitConverter]::ToInt32($b, 16); $c.SdOffset = $off
+                    if ($off -gt 0 -and $off -lt $b.Length) {
+                        $sd = [System.Security.AccessControl.RawSecurityDescriptor]::new($b, $off)
+                        $c.SdParsed = $true
+                        if ($sd.DiscretionaryAcl) { $c.Aces = [int]$sd.DiscretionaryAcl.Count; $c.DaclBytes = [int]$sd.DiscretionaryAcl.BinaryLength }
+                    }
+                }
+            }
+            catch { $c.Error = $_.Exception.Message }
+            [pscustomobject]$c
+        })
+    $o.Delivered = @(foreach ($k in @(Get-ChildItem 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SrpV2' -ErrorAction SilentlyContinue)) {
+            $m = $k.GetValue('EnforcementMode')
+            [pscustomobject]@{ Collection = $k.PSChildName; Mode = $(if ($null -eq $m) { 'NotConfigured' } elseif ("$m" -eq '1') { 'Enabled' } elseif ("$m" -eq '0') { 'AuditOnly' } else { "$m" }); Rules = @(Get-ChildItem -LiteralPath $k.PSPath -ErrorAction SilentlyContinue).Count }
+        })
+    $o.NewestEvent = $null
+    $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL'; Id = 8000, 8001 } -MaxEvents 1 -ErrorAction SilentlyContinue
+    if ($ev) {
+        $st = ''
+        if ($ev.Id -eq 8000) { try { $st = "$(([xml]($ev.ToXml())).Event.EventData.Data | Where-Object { $_.Name -eq 'Status' } | ForEach-Object { $_.'#text' })" } catch { } }
+        $o.NewestEvent = [pscustomobject]@{ Time = $ev.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'); Id = [int]$ev.Id; Status = $st }
+    }
+    [pscustomobject]$o
+}
+
+# Adds the rows for one server from $ALPolicyStoreProbe: "Windows build" (INFO), "Policy converter" (the task), "Policy store" (one
+# OK row when every object is in order, else one row per finding: a non-canonical ACL or no entry for SYSTEM is a FAIL, no entry
+# for Administrators, inheritance switched off or no read access for the service account a WARN) and "Compiled policy" (the
+# <Collection>.AppLocker files against the collections Group Policy delivered: missing or older than a failed conversion is a FAIL)
+function Add-ALPolicyStoreResults($List, [string]$Computer, $Store) {
+    Add-ALResult $List 'INFO' "Windows build $Computer" "$(Get-ALOsLabel $Store.Build) $($Store.InstallType), update level $($Store.Build).$($Store.Ubr)"
+    $Delivered = @($Store.Delivered | Where-Object { $_.Rules -gt 0 -and $_.Mode -ne 'NotConfigured' })
+    $Newest = $Store.NewestEvent
+    $Failed = [bool]($Newest -and $Newest.Id -eq 8000)
+    $T = $Store.Task
+    if ($T) {
+        $Hex = '0x' + ([int64]$T.LastResult).ToString('X')
+        $Bad = ($T.LastResult -notin 0, 0x41300, 0x41301, 0x41303)   # ready, running, never run
+        Add-ALResult $List $(if ($Bad -and $Delivered.Count) { 'WARN' } else { 'INFO' }) "Policy converter $Computer" "the scheduled task \Microsoft\Windows\AppID\PolicyConverter runs as $($T.Principal), $($T.State); last run $(if ($T.LastRun) { $T.LastRun } else { 'never' }), result $Hex$(if ($T.LastResult -ge 0 -and $T.LastResult -lt 65536) { " ($(ConvertTo-ALWin32Message $T.LastResult))" })"
+    }
+    else { Add-ALResult $List $(if ($Delivered.Count) { 'FAIL' } else { 'WARN' }) "Policy converter $Computer" "the scheduled task \Microsoft\Windows\AppID\PolicyConverter was not found ($($Store.TaskError)) - Application Identity runs it to convert every delivered policy" }
+    $Findings = New-Object System.Collections.Generic.List[object]
+    $FolderSddl = ''
+    foreach ($O in @($Store.Store)) {
+        $Where = "$($O.Kind) $($O.Path)"
+        if ($O.Kind -eq 'Folder') { $FolderSddl = $O.Sddl }
+        if (-not $O.Exists) {
+            if ($O.Kind -eq 'RegistryKey' -and $O.Path -like '*\Srp\Gp' -and $Delivered.Count) { $Findings.Add([pscustomobject]@{ Sev = 'WARN'; Text = "$Where does not exist although rules were delivered: no policy has been converted on this server yet" }) }
+            elseif ($O.Kind -eq 'Folder') { $Findings.Add([pscustomobject]@{ Sev = 'FAIL'; Text = "$Where does not exist - the folder every converted policy is written to" }) }
+            continue
+        }
+        if ($O.Error) { $Findings.Add([pscustomobject]@{ Sev = 'FAIL'; Text = "$Where - permissions unreadable: $($O.Error)" }); continue }
+        if (-not $O.Canonical) { $Findings.Add([pscustomobject]@{ Sev = 'FAIL'; Text = "$Where - the ACL is not in canonical order (SDDL $($O.Sddl))" }) }
+        if (-not $O.SystemAllow) { $Findings.Add([pscustomobject]@{ Sev = 'FAIL'; Text = "$Where - no entry lets SYSTEM write (SDDL $($O.Sddl))" }) }
+        if (-not $O.AdminsAllow) { $Findings.Add([pscustomobject]@{ Sev = 'WARN'; Text = "$Where - no entry lets Administrators write (SDDL $($O.Sddl))" }) }
+        if (-not $O.ServiceRead) { $Findings.Add([pscustomobject]@{ Sev = 'WARN'; Text = "$Where - no read access through LOCAL SERVICE, SERVICE, Authenticated Users, Users or Everyone: the Application Identity service (LOCAL SERVICE) may not read it (SDDL $($O.Sddl))" }) }
+        if ($O.Protected -and $O.Kind -ne 'RegistryKey') { $Findings.Add([pscustomobject]@{ Sev = 'WARN'; Text = "$Where - inheritance is switched off (hardened?): compare the SDDL with a server that applies the policy ($($O.Sddl))" }) }
+    }
+    if ($Findings.Count) { foreach ($F in $Findings) { Add-ALResult $List $F.Sev "Policy store $Computer" $F.Text } }
+    else { Add-ALResult $List 'OK' "Policy store $Computer" "permissions in order on $(@($Store.Store | Where-Object { $_.Exists }).Count) object(s) (canonical, SYSTEM and Administrators allowed, readable by the service); System32\AppLocker SDDL $FolderSddl" }
+    foreach ($D in $Delivered) {
+        $F = @($Store.Compiled | Where-Object { $_.Collection -eq $D.Collection }) | Select-Object -First 1
+        if (-not $F) {
+            Add-ALResult $List $(if ($Failed) { 'FAIL' } else { 'WARN' }) "Compiled policy $Computer" "$($D.Collection): $($D.Rules) rule(s) delivered ($($D.Mode)) but no $($D.Collection).AppLocker in System32\AppLocker$(if ($Failed) { " - the conversion failed (event 8000 at $($Newest.Time)) and nothing was written" } else { ' - not converted yet (refresh twice), or the converter has not run' })"
+            continue
+        }
+        $Text = "$($F.File) $($F.Bytes.ToString('N0')) B, written $($F.Modified)$(if ($F.SdParsed) { ", carries a security descriptor with $($F.Aces) ACE(s), DACL $($F.DaclBytes.ToString('N0')) B" })"
+        if ($Failed -and $F.Modified -lt $Newest.Time) { Add-ALResult $List 'FAIL' "Compiled policy $Computer" "$($D.Collection): $($D.Rules) rule(s) delivered, but $Text - older than the failed conversion (event 8000 at $($Newest.Time)): the converter wrote nothing new" }
+        else { Add-ALResult $List 'OK' "Compiled policy $Computer" "$($D.Collection): $($D.Rules) rule(s) delivered ($($D.Mode)); $Text" }
+    }
+    if (-not $Delivered.Count) { Add-ALResult $List 'INFO' "Compiled policy $Computer" "no rules delivered by Group Policy; compiled files present: $(if (@($Store.Compiled).Count) { (@($Store.Compiled) | ForEach-Object { $_.File }) -join ', ' } else { 'none' })" }
+}
+
 # ---- Servers and this computer -----------------------------------------------------------------------------------------------------
 # The scripts reach every server over WinRM. When a server IS the computer a script runs on (the toolkit run on a DC itself, which is
 # also the reference server), WinRM to itself is not possible from a remote session - a second hop to the same computer is refused
@@ -1062,7 +1505,7 @@ function Add-ALGpResults($List, [string]$Computer, $Raw, $Report, [string]$Mode,
         if ("$($Raw.Effective)" -match '=(Enabled|AuditOnly)\([1-9]') { Add-ALResult $List 'INFO' "AppLocker policy events $Computer" "none in the EXE and DLL log yet - the effective policy is loaded ($($Raw.Effective)); the 8001 event can follow the refresh by a minute or two" }
         else { Add-ALResult $List 'INFO' "AppLocker policy events $Computer" 'none in the EXE and DLL log: no AppLocker policy has been applied or rejected on this computer yet' }
     }
-    elseif ($Newest.Id -eq 8000) { Add-ALResult $List 'WARN' "AppLocker policy events $Computer" "newest is 8000 at $($Newest.Time): AppID policy conversion failed, status $($Newest.Status) ($(ConvertTo-ALWin32Message $Newest.Status)) - the rules are NOT loaded. Run 7_AL_diagnose.ps1 (README, Appendix D)" }
+    elseif ($Newest.Id -eq 8000) { $Hint = Get-ALStatusHint $Newest.Status; Add-ALResult $List 'WARN' "AppLocker policy events $Computer" "newest is 8000 at $($Newest.Time): AppID policy conversion failed, status $($Newest.Status) ($(ConvertTo-ALWin32Message $Newest.Status)) - the rules are NOT loaded. Run 7_AL_diagnose.ps1 (README, Appendix D)$(if ($Hint) { ". Status $($Newest.Status) points at $Hint" })" }
     else { Add-ALResult $List 'OK' "AppLocker policy events $Computer" "newest is 8001 at $($Newest.Time): the AppLocker policy was applied successfully$(if (@($Raw.PolicyEvents | Where-Object { $_.Id -eq 8000 }).Count) { ' (older 8000 conversion failures are in the log)' })" }
     Add-ALResult $List 'INFO' "Group Policy $Computer" "last applied $(if ($Report.LastApplied) { $Report.LastApplied } else { '(not in the report)' }) from $(if ($Report.AppliedFrom) { $Report.AppliedFrom } else { '(not in the report)' }); raw gpupdate / gpresult output: $File"
 }

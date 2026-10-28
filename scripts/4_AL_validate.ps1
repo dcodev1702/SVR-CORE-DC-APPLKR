@@ -14,6 +14,11 @@
     be applied and the other one not (with the reason gpresult gives, e.g. Disabled (Link)), the Registry and Security extensions must
     have run without error, and the newest policy event must be 8001 (applied), not 8000 (conversion failed). The raw gpresult output
     of every server is kept in Logs\4_AL_validate-<timestamp>-gpresult\.
+    The rules of each GPO are also checked the way Application Identity converts them on a server: every rule's SID, condition and
+    exceptions as a conditional ACE, and the size of every collection against the 64 KB an ACL can hold (a rule set beyond it is
+    rejected by every server with event 8000, status 1336 - the ACL structure is invalid). Per server the policy store is read too:
+    the PolicyConverter task, the permissions of System32\AppLocker and of the Srp / SrpV2 keys, the compiled <Collection>.AppLocker
+    files against the collections delivered, and the Windows update level (DCs of one build at different levels are a WARN).
     -Mode Auto (default) expects what the enabled link says; Audit, Enforce or Off asserts that mode.
 
 .PARAMETER SettingsFile
@@ -49,8 +54,9 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-27
-    Version  : 1.1 (gpresult per server; EnableAppxRules)
+    Date     : 2026-10-28
+    Version  : 1.2 (policy conversion check per GPO; policy store, compiled policy and update level per server; 1.1: gpresult per
+               server, EnableAppxRules)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT GroupPolicy and ActiveDirectory modules and the AppLocker module; WinRM.
     Changes  : nothing (read-only).
     README   : section 7, step 6; appendix D (troubleshooting).
@@ -134,6 +140,8 @@ try {
         $Bad = @($InGpo.AppLockerPolicy.RuleCollection | Where-Object { $_.EnforcementMode -ne (Get-ALExpectedMode $G[0] $_.Type $DllRules $AppxRules) })
         $Txt = Get-ALPolicySummary $InGpo
         if ($Bad.Count -eq 0 -and $InGpo.AppLockerPolicy.RuleCollection) { Add-ALResult $R 'OK' "$($G[0]) rules in GPO" $Txt } else { Add-ALResult $R 'FAIL' "$($G[0]) rules in GPO" "unexpected or empty: $Txt" }
+        # The rules as Application Identity will convert them: one conditional ACE per rule, one ACL per collection, 64 KB each
+        Add-ALPolicyCheckResults $R "$($G[0]) GPO" (Test-ALPolicyConvertible $InGpo)
     }
 
     # Which mode is active? (links)
@@ -154,6 +162,7 @@ try {
     # ---- per server, over WinRM: service, effective policy, sample decisions, DC services, extra paths, event counts
     if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
     if (-not @($ComputerName).Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
+    $Builds = New-Object System.Collections.Generic.List[object]
     foreach ($C in $ComputerName) {
         try { $Dc = Invoke-ALOn $C $Probe ($EventHours, @($Cfg.ExtraAllowedPaths)) }
         catch { Add-ALResult $R 'FAIL' "WinRM $C" $_.Exception.Message; continue }
@@ -191,6 +200,10 @@ try {
             Add-ALGpResults $R $C $Gp (Resolve-ALGpoNames (ConvertFrom-ALGpResult $Gp.GpresultXml $Gp.GpresultText) $GpIds) $(if ($Expect) { $Expect } else { 'Any' }) $Cfg.AuditGpoName $Cfg.EnforceGpoName $GpFile
         }
         catch { Add-ALResult $R 'WARN' "gpresult $C" "could not be collected: $($_.Exception.Message)" }
+        # The policy store: the converter task, the permissions of the AppLocker folder and keys, the compiled files against the
+        # collections delivered, the update level (SERVER-2022.md, section 7, cause 5)
+        try { $Store = Invoke-ALOn $C $ALPolicyStoreProbe; Add-ALPolicyStoreResults $R $C $Store; $Builds.Add([pscustomobject]@{ Computer = $C; Build = [int]$Store.Build; Ubr = [int]$Store.Ubr }) }
+        catch { Add-ALResult $R 'WARN' "Policy store $C" "could not be read: $($_.Exception.Message)" }
         # A non-admin-writable item in an ExtraAllowedPaths folder is only a problem if the policy still allows it (a bypass)
         if (@($Cfg.ExtraAllowedPaths).Count) {
             try {
@@ -210,6 +223,12 @@ try {
             catch { Add-ALResult $R 'FAIL' "Extra paths $C" "permission check failed: $($_.Exception.Message)" }
         }
         foreach ($E in $Dc.Events) { Add-ALResult $R 'INFO' "Events ${EventHours}h $C" "$($E.Log): $($E.Total) $($E.ById)" }
+    }
+    # Servers of one Windows build should be at the same update level: one that lags may still carry a defect the others lost
+    foreach ($Grp in @($Builds | Group-Object Build)) {
+        $Levels = @($Grp.Group | Sort-Object Ubr | ForEach-Object { "$($_.Computer) $($_.Build).$($_.Ubr)" })
+        if (@($Grp.Group | Select-Object -ExpandProperty Ubr -Unique).Count -gt 1) { Add-ALResult $R 'WARN' "Update levels $(Get-ALOsLabel ([int]$Grp.Name))" "not the same on every server: $($Levels -join ', ') - patch the ones that lag; a server that rejects the policy (event 8000) while another at a newer level applies it points at the update" }
+        else { Add-ALResult $R 'INFO' "Update levels $(Get-ALOsLabel ([int]$Grp.Name))" ($Levels -join ', ') }
     }
 }
 catch { Add-ALResult $R 'FAIL' 'Script' $_.Exception.Message }
