@@ -100,7 +100,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
 
 | Item | Detail |
 |---|---|
-| **Management computer** | Windows 10/11 or Windows Server, **Windows PowerShell 5.1 or PowerShell 7**, RSAT **Group Policy Management** and **Active Directory** modules, and the built-in `AppLocker` module. It must be a member of the DCs' domain (or forest). **Or one of the DCs itself:** every DC already has both modules, and each script runs its per-server steps in-process when the server is the computer it runs on (a remote session cannot open a second WinRM hop to its own computer; the scripts never try). Copy the repository to the DC, e.g. `C:\SVR-CORE-DC-APPLKR`, outside `C:\AaronLocker`. |
+| **Management computer** | Windows 10/11 or Windows Server, **Windows PowerShell 5.1 or PowerShell 7**, RSAT **Group Policy Management** and **Active Directory** modules, and the built-in `AppLocker` module. It must be a member of the DCs' domain (or forest). **Or one of the DCs itself:** every DC already has both modules, and each script runs its per-server steps in-process when the server is the computer it runs on (a remote session cannot open a second WinRM hop to its own computer; the scripts never try). Copy the repository to an administrators-only folder on the DC, e.g. `C:\SVR-CORE-DC-APPLKR`, outside `C:\AaronLocker`: [SERVER-2022.md, *Before you start*](SERVER-2022.md#before-you-start-where-to-run-the-toolkit) copies the zip from the PAW. |
 | **RSAT without Internet** | Windows Server: `Install-WindowsFeature GPMC, RSAT-AD-PowerShell` (the payload is on the server). Windows 11: `Add-WindowsCapability -Online -Name Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0 -Source <Features on Demand media> -LimitAccess` (same for `Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0`), or deploy the capability with MECM/WSUS. |
 | **Account** | Domain Admin (or: create/link GPOs, write SYSVOL, WinRM administrator on the DCs). |
 | **WinRM** | Enabled on every DC (default on Windows Server 2022 and 2025). Test: `Invoke-Command -ComputerName <dc> { $env:COMPUTERNAME }`. |
@@ -127,6 +127,8 @@ Everything the toolkit needs is in this repository, including AccessChk. Nothing
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\0_AL_get_toolkit.ps1
    ```
    Expected: `AccessChk.exe: Microsoft-signed Sysinternals AccessChk 6.15 (64-bit), SHA-256 843B6B1D...F9F3 (pinned)` and `Toolkit ready`.
+
+6. **Optional - no management computer in the DCs' domain:** copy the zip from the PAW to a DC and run the toolkit there. [SERVER-2022.md, *Before you start*](SERVER-2022.md#before-you-start-where-to-run-the-toolkit) has the commands (an administrators-only folder on the DC, the copy over WinRM, the hash check, bringing the results back).
 
 > [!TIP]
 > Optional: run the unit tests once on the management computer — no network, no domain, nothing outside a temporary folder: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tests\Test-AL.ps1` (or `pwsh.exe`). Expected: `Tests: all 230 passed`.
