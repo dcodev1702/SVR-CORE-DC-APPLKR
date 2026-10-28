@@ -155,12 +155,14 @@ try {
         else { Add-ALResult $R 'OK' 'Links' "$Ou : mode $Now (Audit link $(if ($null -eq $A) { 'missing' } elseif ($A) { 'enabled' } else { 'disabled' }), Enforce link $(if ($null -eq $E) { 'missing' } elseif ($E) { 'enabled' } else { 'disabled' }))" }
     }
     $Expect = if ($Mode -eq 'Auto') { ($Active | Select-Object -Unique) } else { $Mode }
+    if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
+    # The STIG item follows the Windows version of the servers in scope (from AD): WN25-00-000080 on 2025, WN22-00-000080 on 2022
+    $Stig = Get-ALStigLabel @(foreach ($C in @($ComputerName | Where-Object { $_ })) { Get-ALAdOsBuild $C $Domain })
     if (@($Expect).Count -ne 1 -or $Expect -eq 'BOTH') { Add-ALResult $R 'FAIL' 'Mode' "target OUs are not in one consistent mode ($($Active -join ', '))"; $Expect = $null }
     elseif ($Mode -ne 'Auto' -and ($Active | Where-Object { $_ -ne $Mode })) { Add-ALResult $R 'FAIL' 'Mode' "expected $Mode but the links say $($Active -join ', ')" }
-    else { Add-ALResult $R 'INFO' 'Mode asserted' "$Expect$(if ($Expect -eq 'Enforce') { ' - WN25-00-000080 / V-277992 met' } elseif ($Expect) { ' - WN25-00-000080 / V-277992 NOT met until Enforce' })" }
+    else { Add-ALResult $R 'INFO' 'Mode asserted' "$Expect$(if ($Expect -eq 'Enforce') { " - $Stig met" } elseif ($Expect) { " - $Stig NOT met until Enforce" })" }
 
     # ---- per server, over WinRM: service, effective policy, sample decisions, DC services, extra paths, event counts
-    if (-not $ComputerName) { $ComputerName = Get-ALTargetComputers $Ous $Domain }
     if (-not @($ComputerName).Count) { Add-ALResult $R 'WARN' 'Servers' 'no servers found in the target OUs' }
     $Builds = New-Object System.Collections.Generic.List[object]
     foreach ($C in $ComputerName) {

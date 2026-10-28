@@ -16,7 +16,7 @@
       - Group Policy on the servers: $ALGpRefreshProbe and Invoke-ALGpRefresh (gpupdate with its output kept, gpresult as text and
         XML), Save-ALGpResult, ConvertFrom-ALGpResultText, ConvertFrom-ALGpResult, Resolve-ALGpoNames, Get-ALGpVerdict, Add-ALGpResults,
         ConvertTo-ALWin32Message (the Status of AppLocker event 8000)
-      - Windows Server versions and STIG items: ConvertTo-ALOsBuild, Get-ALOsLabel, Get-ALStigItem, Get-ALAdOsBuild
+      - Windows Server versions and STIG items: ConvertTo-ALOsBuild, Get-ALOsLabel, Get-ALStigItem, Get-ALStigLabel, Get-ALAdOsBuild
       - the build: Get-ALBuildFolder, New-ALDeployXml, Get-ALPolicySummary, Add-ALPathExceptions, Get-ALRuleExceptions,
         Get-ALExtraPathPlan, Get-ALExpectedMode, Get-ALPolicyMismatch, Get-ALManagedCollections, Merge-ALScanResults,
         ConvertTo-ALAaronLockerPath, Get-ALMissingScanEntries
@@ -372,6 +372,14 @@ function Get-ALStigItem([int]$Build) {
         20348 { return [ordered]@{ StigId = 'WN22-00-000080'; VulnId = 'V-254245'; Severity = 'CAT II'; Title = "Windows Server 2022 $Text" } }
     }
     return $null
+}
+
+# 'WN22-00-000080 / V-254245' for the STIG item of the servers' Windows builds, one per version ('WN22-... , WN25-...' for both);
+# 'the STIG item' when no build has a mapping. For messages written before the servers are probed: pass Get-ALAdOsBuild results.
+function Get-ALStigLabel([int[]]$Builds) {
+    $Ids = @(foreach ($B in @($Builds)) { $I = Get-ALStigItem $B; if ($I) { "$($I.StigId) / $($I.VulnId)" } }) | Sort-Object -Unique
+    if (@($Ids).Count) { return (@($Ids) -join ', ') }
+    return 'the STIG item'
 }
 
 # Windows build of a computer from its AD account (operatingSystemVersion, e.g. '10.0 (26100)'), found by DNS host name or computer
@@ -1216,7 +1224,9 @@ $ALPolicyStoreProbe = {
         if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]$r }
         $r.Exists = $true
         try {
-            $a = Get-Acl -LiteralPath $Path -ErrorAction Stop
+            # Windows PowerShell 5.1 (every WinRM session on a server): Get-Acl -LiteralPath fails on every registry path ("Cannot find
+            # path 'HKEY_LOCAL_MACHINE\...' because it does not exist"); -Path works, and the keys are fixed names without wildcards
+            $a = if ($Kind -eq 'RegistryKey') { Get-Acl -Path $Path -ErrorAction Stop } else { Get-Acl -LiteralPath $Path -ErrorAction Stop }
             $r.Sddl = "$($a.Sddl)"; $r.Owner = "$($a.Owner)"; $r.Canonical = [bool]$a.AreAccessRulesCanonical; $r.Protected = [bool]$a.AreAccessRulesProtected
             foreach ($rule in $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
                 if ($rule.AccessControlType -ne 'Allow') { continue }
