@@ -114,7 +114,7 @@ try {
     New-Item -Path $Evidence -ItemType Directory -Force | Out-Null
 
     foreach ($C in $ComputerName) {
-        try { $P = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ErrorAction Stop }
+        try { $P = Invoke-ALOn $C $Probe }
         catch {
             # The STIG item still follows the server's version: AD knows it
             $Err = $_.Exception.Message
@@ -142,7 +142,7 @@ try {
                     Exe                 = & $Value 'Exe'
                     Msi                 = & $Value 'Msi'
                     Script              = & $Value 'Script'
-                    Appx                = & $Value 'Appx'
+                    Appx                = "$(& $Value 'Appx')$(if (-not $Cfg.EnableAppxRules) { ' - Appx rules off in this baseline (not required by the STIG)' })"
                     Dll                 = "$(& $Value 'Dll')$(if (-not $Cfg.EnableDllRules) { ' - DLL rules off in this baseline (not required by the STIG)' })"
                     ManagedInstaller    = "$(& $Value 'ManagedInstaller')$(if ($Col['ManagedInstaller']) { ' - MECM managed installer (local policy)' })"
                     ServicesEnforcement = $(if ($P.Services -match 'Enabled') { 'Enabled (MECM managed installer)' } else { 'not configured (services are not evaluated)' })

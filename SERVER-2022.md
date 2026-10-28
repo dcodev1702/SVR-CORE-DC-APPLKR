@@ -7,6 +7,8 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 > 1. **The reference DC.** The policy is built from what the build finds on a DC's disk, so the build must scan every Windows Server version it protects. With DCs of both versions, list one DC of the other version in `ExtraReferenceServers`: the build scans it too and merges the scans. Pre-flight warns when a DC runs a version that no reference DC runs ([section 2](#2-cover-every-windows-server-version-in-the-build)).
 > 2. **PowerShell 2.0.** It can still be installed on Server 2022, and it doesn't apply the Constrained Language Mode that AppLocker's script rules rely on. Pre-flight warns when it's installed. Remove it ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
 > 3. **The STIG IDs.** The Server 2022 item is **WN22-00-000080 / V-254245**. `6_AL_stig_check.ps1` reports each DC under the item for its version ([section 4](#4-the-server-2022-stig-ids)).
+>
+> And one thing to watch for: a Server Core 2022 DC that receives the GPO but logs **AppLocker event 8000** (*AppID policy conversion failed*) instead of 8001 has **no policy loaded**. [Section 7](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied) says how to diagnose it (`7_AL_diagnose.ps1`) and what to test first (`EnableAppxRules = $false`).
 
 ## Contents
 
@@ -16,7 +18,8 @@ Part of [SVR-CORE-DC-APPLKR](README.md). The README and the lab run use **Window
 4. [The Server 2022 STIG IDs](#4-the-server-2022-stig-ids)
 5. [What stays the same](#5-what-stays-the-same)
 6. [AppLocker on Server Core: Microsoft's support statement](#6-applocker-on-server-core-microsofts-support-statement)
-7. [Checklist](#7-checklist)
+7. [AppLocker event 8000 on a Server Core 2022 DC: the policy is delivered but not applied](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied)
+8. [Checklist](#8-checklist)
 - [Sources](#sources)
 
 ---
@@ -228,7 +231,80 @@ What it means for you:
 
 ---
 
-## 7. Checklist
+## 7. AppLocker event 8000 on a Server Core 2022 DC: the policy is delivered but not applied
+
+**Symptom.** The GPO applies (gpresult lists it under *Applied Group Policy Objects*), but the DC's *Microsoft-Windows-AppLocker/EXE and DLL* log shows **event 8000** - *AppID policy conversion failed. Status ...* - instead of **8001** (*The AppLocker policy was applied successfully to this computer*). `Get-AppLockerPolicy -Effective -Xml` is empty, `4_AL_validate.ps1` reports `Effective policy <DC> ... not applied` and `AppLocker policy events <DC> ... newest is 8000`, and nothing is audited or enforced on that DC. A Server Core **2025** DC applies the same GPOs ([README, Appendix A](README.md#appendix-a--lab-verification-2026-10-26)).
+
+Event Viewer may show every AppLocker event - 8000, 8001 and 8002 alike - as *The description for Event ID ... from source Microsoft-Windows-AppLocker cannot be found ... The handle is invalid*, followed by the raw field values. In the lab this was **an Event Viewer window that had stayed connected to the DC while the DC restarted**. The window keeps the handle it opened to the DC's event log service for rendering AppLocker messages; the restart invalidates it (*The handle is invalid* is Windows error 6). New events still appear in the list, but none can be rendered. **Close Event Viewer and connect again after the DC's last restart**: the same events then render normally. The events themselves were fine all along. The same text appears when an exported `.evtx` is opened on a computer without the AppLocker provider and without its `LocaleMetaData` folder. For an 8000, the single number under *The following information was included with the event* is the **Status** - note it down.
+
+**What 8000 means.** The Registry client-side extension wrote the rules to `HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2`, and Application Identity (`AppIDSvc`) could not convert them into the form the `appid` driver loads. The event has one field, **Status**, a Win32 error code. Read it on the DC:
+
+```powershell
+Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL'; Id = 8000 } -MaxEvents 5 |
+    ForEach-Object { $x = [xml]$_.ToXml(); [pscustomobject]@{ Time = $_.TimeCreated; Status = $x.Event.EventData.Data.'#text' } }
+```
+
+| Status | Text | Points at |
+|---|---|---|
+| 2 / 3 | The system cannot find the file / path specified | a component of the installation is missing |
+| 126 | The specified module could not be found | a DLL the policy engine loads for this policy is missing (packaged-app support, signature checking) |
+| 1168 | Element not found | something the policy refers to does not exist on this installation |
+| 13 / 87 | The data is invalid / The parameter is incorrect | the policy content itself |
+| 5 | Access is denied | the service cannot read or write its policy keys |
+
+**Diagnose.** Read-only, from the management computer or on the DC's console (Server Core: copy the repository folder to the DC first):
+
+```powershell
+.\7_AL_diagnose.ps1 -ComputerName dc22-01.contoso.com                                      # from the management computer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\7_AL_diagnose.ps1 -Local        # on the DC itself
+```
+
+It decodes the Status of every 8000 of the last 30 days, checks the AppLocker components in `System32` (`appid.sys`, `appidsvc.dll`, `appidapi.dll`, `AppIdPolicyEngineApi.dll`, `AppIdPolicyConverter.exe`, `appidcertstorecheck.exe`, `srpapi.dll`) and the packaged-app components the Appx collection depends on (`AppxSip.dll`, `AppxPackaging.dll`, `AppXDeployment*.dll`), the service and driver, the event provider, what Group Policy delivered against what is effective, gpresult (the GPOs applied and not applied, the Registry and Security extensions), and the Group Policy, AppID and Service Control Manager events - and writes everything to `Outputs\<profile>\diag-<timestamp>\<DC>\` (`components.csv`, `policy-events.csv`, `events-8000.xml`, `policy-from-gpo-registry.xml`, `policy-effective.xml`, `system.txt`, the gpresult reports, ...). A **FAIL** names what stops the policy; a **WARN** names a cause to test.
+
+**Causes, in the order to rule them out:**
+
+1. **The policy never arrived.** `GPO applied` is not the expected GPO (link disabled, denied, not replicated yet) or `GPO processing` shows a Registry extension error. No 8000 is logged in this case. Fix Group Policy first: `3_AL_set_mode.ps1 -Mode Audit -Refresh`, replication, the gpresult report in the evidence folder.
+2. **A component is missing** (`Components <DC>` FAIL; status 2, 3 or 126). Compare `components.csv` with a working DC of the same version. The latest cumulative update, `DISM /Online /Cleanup-Image /RestoreHealth` or an in-place repair restores the files.
+3. **The policy carries something this installation cannot evaluate** (status 126, 1168, 13 or 87 with every component present). The one collection a Server Core DC has no use for is **Appx** (packaged apps): AaronLocker's default rule allows every signed packaged app, and the baseline deploys it. The diagnosis lists this as `Hypothesis <DC>` when the delivered policy carries Appx rules and the installation lacks packaged-app support. Test it:
+   1. `EnableAppxRules = $false` in `AL-Settings.psd1`.
+   2. `.\2_AL_create_gpos.ps1` - both GPOs get an empty, `NotConfigured` Appx collection, like the DLL collection; nothing else changes.
+   3. `.\3_AL_set_mode.ps1 -Mode Audit -Refresh` - the `AppLocker policy events` row must now read *newest is 8001*.
+   4. `.\4_AL_validate.ps1` judges the remaining collections (Exe, Msi, Script). The STIG items need the EXE collection only.
+4. **The display, not the policy.** Every AppLocker event shows *description cannot be found ... The handle is invalid*: an Event Viewer session older than the DC's last restart (reconnect), or `Event provider <DC>` WARN while 8001 events are present. AppLocker works; only the display of its events is affected.
+
+Record the diagnosis folder with your evidence. After the fix, `4_AL_validate.ps1` must show `AppLocker policy events <DC> ... newest is 8001` and `Effective policy <DC>` OK on that DC, and the Audit period starts over for it.
+
+**Running the toolkit on the DC itself.** A forest with no management computer in it, like the lab's second forest, can run the toolkit on one of its DCs: every DC already has the Group Policy and Active Directory modules. Copy the repository to the DC, for example `C:\SVR-CORE-DC-APPLKR`, and run the scripts there, at the console or in a remote PowerShell session. A server that is the computer a script runs on is reached in-process instead of over WinRM, so the build also works when the DC is its own reference server.
+
+![A remote PowerShell session on DC22-2 lists C:\SVR-CORE-DC-APPLKR: the folders AaronLocker, Customizations, images, Logs, Outputs, scripts and tests, and the files .gitattributes, .gitignore, README.md, SERVER-2022.md and THIRD-PARTY-NOTICES.md](images/SERVER-2022-Toolkit-On-DC.png)
+
+<sub>The repository on DC22-2, in a remote PowerShell session. The runs create Logs and Outputs there.</sub>
+
+**Expected outcome.** A DC that applies the policy shows only Information events with readable descriptions, and no 8000. The lab's Server Core 2022 DC in Audit, in Event Viewer connected after the DC's last restart (2026-10-27):
+
+![Event Viewer connected to DC22-2: the AppLocker EXE and DLL log holds three Information events - 8001 at 9:49:46 PM and two 8002 at 10:02:28 PM - and the selected 8002 reads "%SYSTEM32%\CONHOST.EXE was allowed to run."](images/SERVER-2022-Expected-EXE-and-DLL.png)
+
+<sub>EXE and DLL: 8001 after the restart (the policy was loaded), then 8002 for each program that ran and was allowed.</sub>
+
+![Event Viewer connected to DC22-2: the AppLocker MSI and Script log holds one Information event 8005, which reads "%OSDRIVE%\USERS\LORENZO\APPDATA\LOCAL\TEMP\__PSSCRIPTPOLICYTEST_FBBQ3YQK.NZT.PS1 was allowed to run."](images/SERVER-2022-Expected-MSI-and-Script.png)
+
+<sub>MSI and Script: 8005 for a script that ran and was allowed.</sub>
+
+| Event | Log | Means |
+|---|---|---|
+| **8001** | EXE and DLL | The policy was converted and loaded: after every boot and after a refresh that changes the policy. Windows Server 2022 logs it a minute or two after the refresh; Windows Server 2025 logs it at once |
+| **8002** | EXE and DLL | A program ran and a rule allowed it. Logged in Audit and in Enforce, which is why the logs are enlarged |
+| **8005** | MSI and Script | A script or installer ran and a rule allowed it. `__PSScriptPolicyTest_*.ps1` in an administrator's `TEMP` folder is PowerShell checking whether a script policy is in place: normal |
+| 8003 / 8006 | EXE and DLL / MSI and Script | Would have been blocked in Enforce. Review each with `5_AL_review_events.ps1` before Enforce |
+| 8004 / 8007 | EXE and DLL / MSI and Script | Blocked (Enforce only) |
+| **8000** | EXE and DLL | Must not appear. If it does, the rules are not loaded: this section |
+
+> [!NOTE]
+> **Lab status (2026-10-27/28).** A Server Core 2022 DC (`DC22-2`, Standard, the only DC of its own forest, promoted that day) had shown event 8000 in an earlier attempt made from a PAW. When the DC was reached for this diagnosis it had been reset: no AppLocker GPOs, empty AppLocker logs, every component present. The toolkit was then run on the DC itself (there was no management computer in that forest), after the 2026-10 cumulative update (build 20348.4529 to 20348.5761): build, both GPOs, Audit with refresh, validate, diagnose. **Result: no event 8000.** The policy converted and applied - effective `Exe/Msi/Script/Appx = AuditOnly`, `GPO processing` Registry and Security OK, 8002/8005 events flowing - and the DC logged **8001 about 90 seconds after the refresh** (Server 2025 logs it within a second; the `AppLocker policy events` row says so when the policy is already effective and the event has not arrived yet). The earlier 8000 could therefore not be reproduced on a patched Server Core 2022; its status code was never captured. If it returns, `7_AL_diagnose.ps1` captures the status, and the causes above apply in that order. The *description cannot be found ... The handle is invalid* text seen in Event Viewer during that session came from a window that had stayed connected across two DC restarts (21:12 and 21:32 local time). After the DC's next restart, at 21:47, Event Viewer was opened again (21:59) and every event rendered: the screenshots under *Expected outcome*. The earlier report of *8000 ... AppLocker cannot be found* most likely combined a real 8000 with this display effect. Evidence: the `Outputs\<profile>\diag-<ts>\DC22-2.holonet.local\` folder and the `Logs\3_AL_set_mode-Audit-<ts>-gpresult\` reports of that run.
+
+---
+
+## 8. Checklist
 
 - [ ] DCs and their versions listed ([section 1](#1-which-case-are-you-in)).
 - [ ] Only 2022 DCs: `ReferenceServer` is a 2022 DC ([section 2](#all-your-dcs-run-server-2022)).
@@ -236,6 +312,7 @@ What it means for you:
 - [ ] Pre-flight shows no `PowerShell 2.0 … installed` warning ([section 3](#3-remove-powershell-20-from-the-2022-dcs)).
 - [ ] 2022 results recorded: **WN22-00-000080 / V-254245** from `6_AL_stig_check.ps1`, **WN22-00-000410 / V-254278** from pre-flight or section 3 ([section 4](#4-the-server-2022-stig-ids)).
 - [ ] Microsoft's Server Core support statement recorded with your evidence ([section 6](#6-applocker-on-server-core-microsofts-support-statement)).
+- [ ] No AppLocker event 8000 on any 2022 DC after the first refresh (`3_AL_set_mode.ps1 -Refresh` / `4_AL_validate.ps1`, row `AppLocker policy events`); otherwise [section 7](#7-applocker-event-8000-on-a-server-core-2022-dc-the-policy-is-delivered-but-not-applied) and the diagnosis folder kept with the evidence.
 
 ---
 
@@ -244,6 +321,7 @@ What it means for you:
 Checked on 2026-10-27.
 
 - Microsoft Learn: [AppLocker overview](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/applocker/applocker-overview#installing-applocker), *Using AppLocker on Server Core*.
+- Microsoft Learn: [Using Event Viewer with AppLocker](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/applocker/using-event-viewer-with-applocker). Event 8000 = *AppID policy conversion failed*, "indicates that the policy wasn't applied correctly to the computer. The status message is provided for troubleshooting purposes"; 8001 = the policy was applied successfully. The event's manifest (read from a Server 2025 DC with `Get-WinEvent -ListProvider Microsoft-Windows-AppLocker`) declares its single field `Status` as a Win32 error code.
 - Microsoft Learn: [Script rules in AppLocker](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/applocker/script-rules-in-applocker). The script host enforces script rules; PowerShell runs blocked scripts in Constrained Language Mode.
 - PowerShell Team blog: [PowerShell ♥ the Blue Team](https://devblogs.microsoft.com/powershell/powershell-the-blue-team/) (2015). PowerShell 5 switches to Constrained Language Mode when an AppLocker policy controls scripts.
 - Microsoft Learn: [Features removed in Windows Server](https://learn.microsoft.com/windows-server/get-started/removed-deprecated-features-windows-server#features-removed). Windows PowerShell 2.0 is removed from Server 2025 with the September 2025 update.

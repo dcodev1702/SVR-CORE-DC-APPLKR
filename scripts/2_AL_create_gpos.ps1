@@ -8,7 +8,8 @@
       <AuditGpoName>    every collection AuditOnly  - logs what WOULD be blocked, blocks nothing
       <EnforceGpoName>  every collection Enabled    - blocks what the rules do not allow
     Both GPOs carry the rules (Set-AppLockerPolicy -Ldap) and the System Services setting Application Identity = Automatic. The DLL
-    collection is switched off unless EnableDllRules is $true. New links are created DISABLED and an existing link keeps its state, so
+    collection is switched off unless EnableDllRules is $true; the Appx (packaged app) collection is switched off when EnableAppxRules
+    is $false (SERVER-2022.md, section 7). New links are created DISABLED and an existing link keeps its state, so
     nothing reaches a server until 3_AL_set_mode.ps1 enables one link (an ENABLED existing link applies the updated rules at the next
     refresh). Safety: an existing GPO is backed up first (Outputs\<profile>\gpo-backups\<timestamp>, restorable with Restore-GPO), the
     rules are read back from the GPO and compared with the file, and the deployed files are recorded with their SHA-256 in
@@ -90,7 +91,7 @@ try {
         $Src = Get-ChildItem -LiteralPath $Build -Filter "AppLockerRules-*-$Mode.xml" | Sort-Object Name | Select-Object -Last 1
         if (-not $Src) { throw "STOP: no AppLockerRules-*-$Mode.xml in $Build. Run 1_AL_build_policy.ps1." }
         $Out = Join-Path $Build ($Src.BaseName + '-Deploy.xml')
-        $Summary = New-ALDeployXml -SourceXml $Src.FullName -Mode $Mode -DllRules ([bool]$Cfg.EnableDllRules) -OutFile $Out
+        $Summary = New-ALDeployXml -SourceXml $Src.FullName -Mode $Mode -DllRules ([bool]$Cfg.EnableDllRules) -OutFile $Out -AppxRules ([bool]$Cfg.EnableAppxRules)
         $Name = if ($Mode -eq 'Audit') { $Cfg.AuditGpoName } else { $Cfg.EnforceGpoName }
         [pscustomobject]@{ Mode = $Mode; Gpo = $Name; Existing = (Get-GPO -Name $Name -Server $Domain.PDC -ErrorAction SilentlyContinue); Xml = $Out; Sha256 = (Get-ALSha256 $Out); Summary = $Summary }
     }

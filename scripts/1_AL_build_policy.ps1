@@ -21,6 +21,8 @@
          file recorded in build-info.json, removes the temporary folders, and warns about any Windows Server version in the target OUs
          (from AD) that no scanned server runs
     Outputs\<profile>\latest.txt names the newest build; 2_AL_create_gpos.ps1 deploys it.
+    The script may run on the reference server itself (the toolkit on a DC): that server is then reached in this process instead of
+    over WinRM, with the same steps and the same temporary folder. Every other server is still reached over WinRM.
 
 .PARAMETER SettingsFile
     Settings file to use. Default: AL-Settings.psd1 next to the script.
@@ -68,7 +70,7 @@
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
     Date     : 2026-10-27
-    Version  : 1.1 (ExtraReferenceServers: merged scans for DCs of more than one Windows Server version)
+    Version  : 1.2 (ExtraReferenceServers: merged scans for DCs of more than one Windows Server version; runs on the reference server itself)
     Requires : Windows PowerShell 5.1 or PowerShell 7; RSAT ActiveDirectory module; WinRM administrator on the servers; FullLanguage
                mode and an execution policy that runs unsigned scripts on the reference server and every extra reference server
                (AaronLocker's scripts are not signed).
@@ -87,18 +89,39 @@ param(
 . "$PSScriptRoot\AL-Common.ps1"
 $Cfg = Initialize-AL -ScriptName '1_AL_build_policy' -SettingsFile $SettingsFile -Overrides @{ ReferenceServer = $ComputerName; ExtraAllowedPaths = $ExtraAllowedPaths; ExtraReferenceServers = $ExtraReferenceServers }
 if (-not $ComputerName) { $ComputerName = $Cfg.ReferenceServer }
-# Every session the build opens; the finally block removes the temporary folder and closes whatever is still open
+# Every server the build opens (Name, Role, Work, Local, Session, Info, Prepared); the finally block removes the temporary folder
+# from each one and closes whatever session is still open. A server that is this computer (the toolkit run on the reference DC
+# itself) has no session: the same commands run in this process, because a remote session cannot open a second hop to its own computer.
 $Servers = New-Object System.Collections.Generic.List[object]
 
-# Opens a session to a server the build runs AaronLocker on and prepares a fresh work folder there ($Work): the toolkit, the
-# Customizations overlay and the KnownAdmins list. Every server gets its own folder name (C:\AaronLocker, C:\AaronLocker-1, ...), so two
-# names for the same computer cannot delete each other's folder. Stops before anything is written on the server unless PowerShell runs
-# in FullLanguage mode and the execution policy lets unsigned scripts run. Returns Name, Work, Session and Info (OS, build, folders).
+# Runs a script block on a build server: in its session, or in this process when it is this computer
+function Invoke-ALServer($Server, [scriptblock]$ScriptBlock, [object[]]$ArgumentList = @()) {
+    if ($null -eq $ArgumentList) { $ArgumentList = @() }
+    if ($Server.Local) { return (& $ScriptBlock @ArgumentList) }
+    return (Invoke-Command -Session $Server.Session -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop)
+}
+# Copies files to / from a build server (a plain copy when it is this computer)
+function Copy-ALToServer($Server, [string]$Path, [string]$Destination, [switch]$Recurse) {
+    if ($Server.Local) { Copy-Item -Path $Path -Destination $Destination -Recurse:$Recurse -Force -ErrorAction Stop }
+    else { Copy-Item -Path $Path -Destination $Destination -ToSession $Server.Session -Recurse:$Recurse -Force -ErrorAction Stop }
+}
+function Copy-ALFromServer($Server, [string]$Path, [string]$Destination, [switch]$Recurse) {
+    if ($Server.Local) { Copy-Item -Path $Path -Destination $Destination -Recurse:$Recurse -Force -ErrorAction Stop }
+    else { Copy-Item -Path $Path -Destination $Destination -FromSession $Server.Session -Recurse:$Recurse -Force -ErrorAction Stop }
+}
+
+# Opens a build server - a WinRM session to it, or nothing when it is this computer - and prepares a fresh work folder there
+# ($Work): the toolkit, the Customizations overlay and the KnownAdmins list. Every server gets its own folder name (C:\AaronLocker,
+# C:\AaronLocker-1, ...), so two names for the same computer cannot delete each other's folder. Stops before anything is written on
+# the server unless PowerShell runs in FullLanguage mode and the execution policy lets unsigned scripts run. Returns the server object.
 function Open-ALBuildServer([string]$Name, [string]$Role, [string]$Work) {
-    $S = New-PSSession -ComputerName $Name -ErrorAction Stop
-    $Server = [pscustomobject]@{ Name = $Name; Role = $Role; Work = $Work; Session = $S; Info = $null; Prepared = $false }
+    $Local = Test-ALLocalComputer $Name
+    if ($Local -and (ConvertTo-ALComparablePath $Cfg.Root).StartsWith((ConvertTo-ALComparablePath $Work) + '\', [StringComparison]::Ordinal)) { throw "STOP: the work folder $Work would contain this repository ($($Cfg.Root)); the build deletes it. Pass another -RemoteWork." }
+    $S = if ($Local) { $null } else { New-PSSession -ComputerName $Name -ErrorAction Stop }
+    $Server = [pscustomobject]@{ Name = $Name; Role = $Role; Work = $Work; Local = $Local; Session = $S; Info = $null; Prepared = $false }
     $Servers.Add($Server)
-    $Server.Info = Invoke-Command -Session $S -ErrorAction Stop -ScriptBlock {
+    $Server.Info = Invoke-ALServer $Server -ArgumentList $Work -ScriptBlock {
+        param([string]$Work)
         $os = Get-CimInstance Win32_OperatingSystem
         $cs = Get-CimInstance Win32_ComputerSystem
         $o = [pscustomobject]@{
@@ -110,35 +133,36 @@ function Open-ALBuildServer([string]$Name, [string]$Role, [string]$Work) {
         if ($o.Language -ne 'FullLanguage') { $o.Problem = "PowerShell runs in $($o.Language) mode; AaronLocker needs FullLanguage" }
         elseif ($o.ExecPolicy -in 'AllSigned', 'Restricted') { $o.Problem = "the execution policy is $($o.ExecPolicy); AaronLocker's scripts are not signed" }
         else {
-            Remove-Item -LiteralPath $using:Work -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -Path $using:Work -ItemType Directory -Force | Out-Null
+            Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -Path $Work -ItemType Directory -Force | Out-Null
         }
         $o
     }
     $I = $Server.Info
-    Write-Host "$($Role): $($I.Computer) | $($I.Caption) $($I.InstallationType) (build $($I.Build)) | PowerShell $($I.PowerShell) | $($I.Language) | execution policy $($I.ExecPolicy)"
+    Write-Host "$($Role): $($I.Computer) | $($I.Caption) $($I.InstallationType) (build $($I.Build)) | PowerShell $($I.PowerShell) | $($I.Language) | execution policy $($I.ExecPolicy)$(if ($Local) { ' | this computer, no WinRM' })"
     if ($I.Problem) { throw "STOP: $Role $Name - $($I.Problem). Nothing was written on that server and nothing was deployed." }
     $Server.Prepared = $true
-    Copy-Item -Path (Join-Path $Cfg.ToolkitPath '*') -Destination $Work -ToSession $S -Recurse -Force
+    Copy-ALToServer $Server (Join-Path $Cfg.ToolkitPath '*') $Work -Recurse
     # Overlay: Server Core-safe deny list + the ExtraAllowedPaths and KnownAdmins hooks (see Customizations\)
-    Copy-Item -Path (Join-Path $Overlay '*') -Destination $Work -ToSession $S -Recurse -Force
+    Copy-ALToServer $Server (Join-Path $Overlay '*') $Work -Recurse
     # Desktop-only static rules (OneDrive installer, Chrome Flash) have no place on a server; dropped from the server's copy only
-    Invoke-Command -Session $S -ScriptBlock {
-        Remove-Item -Path (Join-Path $using:Work 'MergeRules-Static\OneDrive-*.xml'), (Join-Path $using:Work 'MergeRules-Static\Allow-GoogleChromeFlashPlayer.xml') -Force -ErrorAction SilentlyContinue
+    Invoke-ALServer $Server -ArgumentList $Work -ScriptBlock {
+        param([string]$Work)
+        Remove-Item -Path (Join-Path $Work 'MergeRules-Static\OneDrive-*.xml'), (Join-Path $Work 'MergeRules-Static\Allow-GoogleChromeFlashPlayer.xml') -Force -ErrorAction SilentlyContinue
     }
     # KnownAdmins changes the scan (their write access does not count as user-writable), so every scanned server gets the list
-    if ($Known.Count) { Invoke-Command -Session $S -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:Work 'CustomizationInputs\KnownAdmins.txt') -Value $using:Known -Encoding UTF8 } }
+    if ($Known.Count) { Invoke-ALServer $Server -ArgumentList $Work, $Known -ScriptBlock { param([string]$Work, [string[]]$Known) Set-Content -LiteralPath (Join-Path $Work 'CustomizationInputs\KnownAdmins.txt') -Value $Known -Encoding UTF8 } }
     return $Server
 }
 
 # Runs AaronLocker in the server's work folder. -Rescan scans the server; without it AaronLocker builds the rules from the scan files
 # already in its ScanResults folder (the merged scan).
 function Invoke-ALAaronLocker($Server, [switch]$Rescan) {
-    $Scan = [bool]$Rescan
-    $Work = $Server.Work
-    Invoke-Command -Session $Server.Session -ErrorAction Stop -ScriptBlock {
-        Set-Location -LiteralPath $using:Work
-        if ($using:Scan) { & .\Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan } else { & .\Create-Policies.ps1 -AppLockerOrWDAC AppLocker }
+    Invoke-ALServer $Server -ArgumentList $Server.Work, ([bool]$Rescan) -ScriptBlock {
+        param([string]$Work, [bool]$Scan)
+        Push-Location -LiteralPath $Work
+        try { if ($Scan) { & .\Create-Policies.ps1 -AppLockerOrWDAC AppLocker -Rescan } else { & .\Create-Policies.ps1 -AppLockerOrWDAC AppLocker } }
+        finally { Pop-Location }
     } | Out-Host
 }
 
@@ -146,18 +170,23 @@ function Invoke-ALAaronLocker($Server, [switch]$Rescan) {
 function Save-ALScan($Server) {
     $Folder = Join-Path $Dest "ScanResults-$($Server.Name)"
     New-Item -Path $Folder -ItemType Directory -Force | Out-Null
-    Copy-Item -Path (Join-Path $Server.Work 'ScanResults\*') -Destination $Folder -FromSession $Server.Session -Recurse -Force -ErrorAction Stop
+    Copy-ALFromServer $Server (Join-Path $Server.Work 'ScanResults\*') $Folder -Recurse
     return [pscustomobject]@{ Server = $Server.Name; Folder = $Folder }
 }
 
 # Removes the work folder from a server the build prepared (a server it refused is left untouched) and closes its session
 function Close-ALBuildServer($Server) {
     if ($Server.Prepared) {
-        $Work = $Server.Work
-        try { Invoke-Command -Session $Server.Session -ScriptBlock { Set-Location -LiteralPath $env:SystemRoot; if (Test-Path -LiteralPath $using:Work) { Remove-Item -LiteralPath $using:Work -Recurse -Force -ErrorAction Stop } } }
-        catch { Write-Warning "Could not remove $Work on $($Server.Name): $($_.Exception.Message)" }
+        try {
+            Invoke-ALServer $Server -ArgumentList $Server.Work -ScriptBlock {
+                param([string]$Work)
+                if ((Get-Location).Path.StartsWith($Work, [StringComparison]::OrdinalIgnoreCase)) { Set-Location -LiteralPath $env:SystemRoot }
+                if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction Stop }
+            }
+        }
+        catch { Write-Warning "Could not remove $($Server.Work) on $($Server.Name): $($_.Exception.Message)" }
     }
-    Remove-PSSession $Server.Session
+    if ($Server.Session) { Remove-PSSession $Server.Session }
     [void]$Servers.Remove($Server)
 }
 
@@ -179,7 +208,7 @@ try {
     # AaronLocker stops the build before the first scan): toolkit + Customizations overlay + KnownAdmins
     if ($Known.Count) { Write-Host "Known administrators groups: $($Known -join ', ')" }
     $Ref = Open-ALBuildServer $ComputerName 'Reference server' $RemoteWork
-    $Session = $Ref.Session
+    $RefWhere = if ($Ref.Local) { @{ ComputerName = $ComputerName } } else { @{ Session = $Ref.Session } }
     $ExtraRefs = New-Object System.Collections.Generic.List[object]
     foreach ($N in $Scanners) {
         $X = Open-ALBuildServer $N 'Extra reference server' "$RemoteWork-$($ExtraRefs.Count + 1)"
@@ -200,7 +229,7 @@ try {
     if ($Extra.Count) {
         # Every server the policy will reach, not only the reference: the GPO carries one rule set for all of them
         $Findings = New-Object System.Collections.Generic.List[object]
-        @(Invoke-ALWritableCheck -Paths $Extra -Cfg $Cfg -Session $Session) | ForEach-Object { $Findings.Add($_) }
+        @(Invoke-ALWritableCheck -Paths $Extra -Cfg $Cfg @RefWhere) | ForEach-Object { $Findings.Add($_) }
         $Checked += $ComputerName
         $Others = @($Targets | Where-Object { $_ -ne $ComputerName -and $_ -notlike "$ComputerName.*" -and $ComputerName -notlike "$_.*" })
         foreach ($C in $Others) {
@@ -218,7 +247,7 @@ try {
         }
         foreach ($D in $Plan.Drop) { Write-Host "Extra allowed path: $($D.Entry) - LEFT OUT of the policy: $($D.Reason). Non-admins cannot run from it; elevated administrators still can. Fix its permissions (README, C:\Admin) and rebuild to allow it." -ForegroundColor Yellow }
         $Keep = @($Plan.Keep)
-        if ($Keep.Count) { Invoke-Command -Session $Session -ScriptBlock { Set-Content -LiteralPath (Join-Path $using:RemoteWork 'CustomizationInputs\ExtraAllowedPaths.txt') -Value $using:Keep -Encoding UTF8 } }
+        if ($Keep.Count) { Invoke-ALServer $Ref -ArgumentList $RemoteWork, $Keep -ScriptBlock { param([string]$Work, [string[]]$Keep) Set-Content -LiteralPath (Join-Path $Work 'CustomizationInputs\ExtraAllowedPaths.txt') -Value $Keep -Encoding UTF8 } }
     }
 
     # 4. AaronLocker builds the rules on the server (it only reads permissions; nothing is applied there)
@@ -245,15 +274,15 @@ try {
         else { Write-Host "The extra reference servers add nothing to the scan of ${ComputerName}: its scan covers them." }
         # The merged scan replaces the reference server's; AaronLocker without -Rescan builds the rules from it. The first run's rule
         # files are removed so that only rules built from the merged scan come back.
-        Copy-Item -Path (Join-Path (Join-Path $Dest 'ScanResults') '*') -Destination (Join-Path $RemoteWork 'ScanResults') -ToSession $Session -Force -ErrorAction Stop
-        Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock { Remove-Item -Path (Join-Path $using:RemoteWork 'Outputs\*') -Recurse -Force -ErrorAction Stop }
+        Copy-ALToServer $Ref (Join-Path (Join-Path $Dest 'ScanResults') '*') (Join-Path $RemoteWork 'ScanResults')
+        Invoke-ALServer $Ref -ArgumentList $RemoteWork -ScriptBlock { param([string]$Work) Remove-Item -Path (Join-Path $Work 'Outputs\*') -Recurse -Force -ErrorAction Stop }
         Write-Host "Generating the rules again on $ComputerName from the merged scan ..." -ForegroundColor Cyan
         Invoke-ALAaronLocker $Ref
     }
 
     # 6. bring the results back, add the exceptions from step 3, record the build (build-info.json, latest.txt)
-    Copy-Item -Path (Join-Path $RemoteWork 'Outputs\*') -Destination $Dest -FromSession $Session -Recurse -Force
-    if (-not $Merge) { Copy-Item -Path (Join-Path $RemoteWork 'ScanResults') -Destination $Dest -FromSession $Session -Recurse -Force }
+    Copy-ALFromServer $Ref (Join-Path $RemoteWork 'Outputs\*') $Dest -Recurse
+    if (-not $Merge) { Copy-ALFromServer $Ref (Join-Path $RemoteWork 'ScanResults') $Dest -Recurse }
     $Rules = @(Get-ChildItem -LiteralPath $Dest -Filter 'AppLockerRules-*.xml' -File)
     if (-not @($Rules | Where-Object { $_.Name -like '*-Audit.xml' }).Count -or -not @($Rules | Where-Object { $_.Name -like '*-Enforce.xml' }).Count) { throw "STOP: the build produced no Audit/Enforce rules file in $Dest - see the AaronLocker output above." }
     # Prove that the rules were generated from the merged scan: every merged folder and deny-list entry must be in them

@@ -186,7 +186,7 @@ try {
         $IsRef = ($C -eq $Cfg.ReferenceServer)
         $IsExtraRef = ($C -in $ExtraRefs)
         $Tag = if ($IsRef) { "$C (reference)" } elseif ($IsExtraRef) { "$C (extra reference)" } else { $C }
-        try { $P = Invoke-Command -ComputerName $C -ScriptBlock $Probe -ArgumentList (, @($Cfg.ExtraAllowedPaths)) -ErrorAction Stop }
+        try { $P = Invoke-ALOn $C $Probe (, @($Cfg.ExtraAllowedPaths)) }
         catch { Add-ALResult $R 'FAIL' "WinRM $Tag" $_.Exception.Message; continue }
         Add-ALResult $R 'OK' "Server $Tag" "$($P.Os); PowerShell $($P.PsVersion)"
         $Versions.Add([pscustomobject]@{ Server = $C; Tag = $Tag; IsRef = ($IsRef -or $IsExtraRef); Build = [int]$P.Build; InstallType = "$($P.InstallType)" })

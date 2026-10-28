@@ -10,6 +10,11 @@
       - results and evidence: New-ALResults, Add-ALResult, Write-ALResults (table + CSV + PASSED / FAILED line), Stop-ALTranscript
       - the domain and GPOs: Get-ALDomainInfo, Resolve-ALTargetOUs, Get-ALTargetComputers, Get-ALGpoPaths, Get-ALLinkState,
         Backup-ALGpo, Step-ALGpoVersion, Merge-ALExtensionNames, Set-ALEventLogSize
+      - the servers and this computer: Get-ALLocalNames, Test-ALLocalComputer, Invoke-ALOn (a script block over WinRM, or in this
+        process when the server is the computer the script runs on - the toolkit run on a DC itself)
+      - Group Policy on the servers: $ALGpRefreshProbe and Invoke-ALGpRefresh (gpupdate with its output kept, gpresult as text and
+        XML), Save-ALGpResult, ConvertFrom-ALGpResultText, ConvertFrom-ALGpResult, Resolve-ALGpoNames, Get-ALGpVerdict, Add-ALGpResults,
+        ConvertTo-ALWin32Message (the Status of AppLocker event 8000)
       - Windows Server versions and STIG items: ConvertTo-ALOsBuild, Get-ALOsLabel, Get-ALStigItem, Get-ALAdOsBuild
       - the build: Get-ALBuildFolder, New-ALDeployXml, Get-ALPolicySummary, Add-ALPathExceptions, Get-ALRuleExceptions,
         Get-ALExtraPathPlan, Get-ALExpectedMode, Get-ALPolicyMismatch, Get-ALManagedCollections, Merge-ALScanResults,
@@ -35,8 +40,8 @@
 .NOTES
     Project  : SVR-CORE-DC-APPLKR - https://github.com/dcodev1702/SVR-CORE-DC-APPLKR
     Author   : dcodev1702
-    Date     : 2026-10-26
-    Version  : 1.0
+    Date     : 2026-10-27
+    Version  : 1.2 (gpupdate / gpresult helpers; EnableAppxRules; scripts run on a server itself without WinRM to itself)
     Requires : Windows PowerShell 5.1 or PowerShell 7. ASCII-only source. Modules are loaded on demand by Import-ALModule.
     Changes  : nothing by itself; the step scripts decide what is changed.
 #>
@@ -71,6 +76,7 @@ function New-ALDefaultSettings {
         KnownAdmins       = @()
         AccessChkSha256   = ''
         EnableDllRules    = $false
+        EnableAppxRules   = $true
         EventLogSizesMB   = @{ 'EXE and DLL' = 100; 'MSI and Script' = 20; 'Packaged app-Execution' = 20; 'Packaged app-Deployment' = 20 }
     }
 }
@@ -408,8 +414,9 @@ function Get-ALBuildFolder($Cfg, [string]$OutputFolder) {
 }
 
 # Turns an AaronLocker output file into the XML that goes into a GPO: Audit = every collection AuditOnly, Enforce = every collection
-# Enabled, and the DLL collection emptied and set to NotConfigured unless DLL rules are wanted.
-function New-ALDeployXml([string]$SourceXml, [ValidateSet('Audit', 'Enforce')][string]$Mode, [bool]$DllRules, [string]$OutFile) {
+# Enabled, the DLL collection emptied and set to NotConfigured unless DLL rules are wanted, and the Appx (packaged app) collection
+# emptied the same way when EnableAppxRules is $false (Server Core installations without packaged-app support).
+function New-ALDeployXml([string]$SourceXml, [ValidateSet('Audit', 'Enforce')][string]$Mode, [bool]$DllRules, [string]$OutFile, [bool]$AppxRules = $true) {
     $Doc = New-Object System.Xml.XmlDocument
     try { $Doc.Load($SourceXml) } catch { throw "STOP: $SourceXml is not valid XML ($($_.Exception.Message))." }
     if (-not $Doc.AppLockerPolicy) { throw "STOP: $SourceXml is not an AppLocker policy." }
@@ -417,6 +424,7 @@ function New-ALDeployXml([string]$SourceXml, [ValidateSet('Audit', 'Enforce')][s
     foreach ($Rc in @($Doc.AppLockerPolicy.RuleCollection)) {
         if ($Rc.Type -eq 'ManagedInstaller') { throw 'STOP: the source contains a ManagedInstaller rule collection; leave that to Configuration Manager.' }
         if ($Rc.Type -eq 'Dll' -and -not $DllRules) { $Rc.RemoveAll(); $Rc.SetAttribute('Type', 'Dll'); $Rc.SetAttribute('EnforcementMode', 'NotConfigured') }
+        elseif ($Rc.Type -eq 'Appx' -and -not $AppxRules) { $Rc.RemoveAll(); $Rc.SetAttribute('Type', 'Appx'); $Rc.SetAttribute('EnforcementMode', 'NotConfigured') }
         elseif ($Rc.EnforcementMode -ne $Want) { throw "STOP: $($Rc.Type) collection is '$($Rc.EnforcementMode)' in $SourceXml, expected $Want." }
     }
     $Doc.Save($OutFile)
@@ -428,11 +436,11 @@ function Get-ALPolicySummary([xml]$Doc) {
     return (@($Doc.AppLockerPolicy.RuleCollection | Sort-Object Type | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)($(@($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count))" }) -join ', ')
 }
 
-# Sets the AppLocker event log sizes (MB) on the computers; returns one text line per computer
+# Sets the AppLocker event log sizes (MB) on the computers (over WinRM, or in this process for this computer); one text line each
 function Set-ALEventLogSize([string[]]$Computers, [hashtable]$SizesMB) {
     foreach ($C in $Computers) {
         try {
-            Invoke-Command -ComputerName $C -ArgumentList $SizesMB -ErrorAction Stop -ScriptBlock {
+            Invoke-ALOn $C -ArgumentList (, $SizesMB) -ScriptBlock {
                 param($Sizes)
                 foreach ($N in $Sizes.Keys) {
                     wevtutil.exe sl "Microsoft-Windows-AppLocker/$N" /ms:$([int64]$Sizes[$N] * 1MB)
@@ -529,12 +537,13 @@ $ALWritableCheck = {
     }
 }
 
-# Runs $ALWritableCheck on a server (-ComputerName or -Session) with the KnownAdmins setting; returns Kind / Path / Account /
-# IsFolder / Computer rows
+# Runs $ALWritableCheck on a server (-ComputerName or -Session; in this process when the server is this computer) with the
+# KnownAdmins setting; returns Kind / Path / Account / IsFolder / Computer rows
 function Invoke-ALWritableCheck([string[]]$Paths, $Cfg, [string]$ComputerName, $Session) {
-    $Where = if ($Session) { @{ Session = $Session } } else { @{ ComputerName = $ComputerName } }
     $Name = if ($Session) { $Session.ComputerName } else { $ComputerName }
-    foreach ($Line in @(Invoke-Command @Where -ScriptBlock $ALWritableCheck -ArgumentList @($Paths), @($Cfg.KnownAdmins) -ErrorAction Stop)) {
+    $Lines = if ($Session) { @(Invoke-Command -Session $Session -ScriptBlock $ALWritableCheck -ArgumentList @($Paths), @($Cfg.KnownAdmins) -ErrorAction Stop) }
+    else { @(Invoke-ALOn $ComputerName $ALWritableCheck (@($Paths), @($Cfg.KnownAdmins))) }
+    foreach ($Line in $Lines) {
         $F = "$Line" -split '\|'
         [pscustomobject]@{ Kind = $F[0]; Path = $F[1]; Account = $(if ($F.Count -gt 2) { $F[2] } else { '' }); IsFolder = ($F.Count -gt 3 -and $F[3] -eq 'D'); Computer = $Name }
     }
@@ -702,37 +711,330 @@ function Get-ALMissingScanEntries([xml]$Policy, $Merge, $Roots) {
     }
 }
 
-# Rule collections this baseline manages: Exe, Msi, Script, Appx (+ Dll when DLL rules are on). Others in an effective policy - the DLL
-# collection when DLL rules are off, ManagedInstaller - come from other policies (e.g. the local MECM managed-installer policy).
-function Get-ALManagedCollections([bool]$DllRules) { return @('Exe', 'Msi', 'Script', 'Appx') + @(if ($DllRules) { 'Dll' }) }
-function Get-ALExpectedMode([string]$Mode, [string]$Type, [bool]$DllRules) {
+# Rule collections this baseline manages: Exe, Msi, Script, Appx (unless EnableAppxRules is off), Dll (only when DLL rules are on).
+# Others in an effective policy - the DLL collection when DLL rules are off, ManagedInstaller - come from other policies (e.g. the
+# local MECM managed-installer policy). A collection that is off must be NotConfigured in the GPOs.
+function Get-ALManagedCollections([bool]$DllRules, [bool]$AppxRules = $true) { return @('Exe', 'Msi', 'Script') + @(if ($AppxRules) { 'Appx' }) + @(if ($DllRules) { 'Dll' }) }
+function Get-ALExpectedMode([string]$Mode, [string]$Type, [bool]$DllRules, [bool]$AppxRules = $true) {
     if ($Type -eq 'Dll' -and -not $DllRules) { return 'NotConfigured' }
+    if ($Type -eq 'Appx' -and -not $AppxRules) { return 'NotConfigured' }
     if ($Mode -eq 'Audit') { return 'AuditOnly' } else { return 'Enabled' }
 }
 # The managed collections of an effective policy that are missing or in the wrong mode for Audit / Enforce (nothing = as expected)
-function Get-ALPolicyMismatch([xml]$Policy, [string]$Mode, [bool]$DllRules) {
+function Get-ALPolicyMismatch([xml]$Policy, [string]$Mode, [bool]$DllRules, [bool]$AppxRules = $true) {
     $Cols = @{}
     foreach ($Rc in @($Policy.AppLockerPolicy.RuleCollection)) { $Cols["$($Rc.Type)"] = "$($Rc.EnforcementMode)" }
-    foreach ($T in Get-ALManagedCollections $DllRules) {
-        $Want = Get-ALExpectedMode $Mode $T $DllRules
+    foreach ($T in Get-ALManagedCollections $DllRules $AppxRules) {
+        $Want = Get-ALExpectedMode $Mode $T $DllRules $AppxRules
         if (-not $Cols.ContainsKey($T)) { "$T missing (expected $Want)" }
         elseif ($Cols[$T] -ne $Want) { "$T=$($Cols[$T]) (expected $Want)" }
     }
 }
 
-# Group Policy refresh over WinRM. The first refresh after a computer receives the GPO starts Application Identity;
-# a second one makes it load the rules - so two passes.
-function Invoke-ALRefresh([string[]]$Computers) {
-    foreach ($C in $Computers) {
-        try {
-            Invoke-Command -ComputerName $C -ErrorAction Stop -ScriptBlock {
-                gpupdate.exe /target:computer /force | Out-Null
-                Start-Sleep -Seconds 10
-                gpupdate.exe /target:computer /force | Out-Null
-                $s = Get-CimInstance Win32_Service -Filter "Name='AppIDSvc'"
-                "$env:COMPUTERNAME refreshed; AppIDSvc $($s.State)/$($s.StartMode)"
+# ---- Servers and this computer -----------------------------------------------------------------------------------------------------
+# The scripts reach every server over WinRM. When a server IS the computer a script runs on (the toolkit run on a DC itself, which is
+# also the reference server), WinRM to itself is not possible from a remote session - a second hop to the same computer is refused
+# ("Access is denied", "A specified logon session does not exist") - so the same script blocks run in this process instead. The
+# remote behaviour is unchanged.
+
+# The names and addresses this computer answers to: its name, its DNS name, localhost, its IP addresses (computed once)
+$script:ALLocalNames = $null
+function Get-ALLocalNames {
+    if ($script:ALLocalNames) { return , $script:ALLocalNames }
+    $Set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($N in @($env:COMPUTERNAME, 'localhost', '127.0.0.1', '::1', '.')) { if ($N) { [void]$Set.Add($N) } }
+    try {
+        $Cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        if ($Cs.DNSHostName) { [void]$Set.Add("$($Cs.DNSHostName)"); if ($Cs.Domain) { [void]$Set.Add("$($Cs.DNSHostName).$($Cs.Domain)") } }
+    }
+    catch { }
+    try { foreach ($A in @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()))) { [void]$Set.Add($A.IPAddressToString) } } catch { }
+    try { foreach ($A in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=true' -ErrorAction Stop | ForEach-Object { $_.IPAddress })) { if ($A) { [void]$Set.Add("$A") } } } catch { }
+    $script:ALLocalNames = $Set
+    return , $Set   # the comma keeps the set from being unrolled into an array (whose Contains would be case-sensitive)
+}
+
+# True when a server name (short name, FQDN, localhost or an IP address) is this computer
+function Test-ALLocalComputer([string]$ComputerName) {
+    $N = "$ComputerName".Trim().TrimEnd('.')
+    if (-not $N) { return $false }
+    $Names = Get-ALLocalNames
+    return $Names.Contains($N)
+}
+
+# Runs a script block on a server over WinRM, or in this process when the server is this computer. $ArgumentList binds to the block's
+# parameters the way Invoke-Command -ArgumentList does: one element per parameter (wrap a single array in (, $Array)).
+function Invoke-ALOn([string]$ComputerName, [scriptblock]$ScriptBlock, [object[]]$ArgumentList = @()) {
+    if ($null -eq $ArgumentList) { $ArgumentList = @() }
+    if (Test-ALLocalComputer $ComputerName) { return (& $ScriptBlock @ArgumentList) }
+    return (Invoke-Command -ComputerName $ComputerName -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop)
+}
+
+# ---- Group Policy refresh and gpresult ---------------------------------------------------------------------------------------------
+# Used by 3_AL_set_mode.ps1 (-Refresh), 4_AL_validate.ps1 and 7_AL_diagnose.ps1: gpupdate with its output kept, gpresult as text and
+# as XML, and the result rows that say which AppLocker GPO a computer applied and whether its extensions ran.
+
+# Runs ON a server. With $Refresh: gpupdate /target:computer /force twice (the first refresh after a computer receives the GPO starts
+# Application Identity, the second makes it load the rules), $WaitSeconds apart, keeping the full output and the exit code of each
+# pass. Always: gpresult /scope computer as text (/r) and as XML (/x), Application Identity, the effective AppLocker policy and the
+# newest policy events (8001 = applied, 8000 = conversion failed, with its Status). Nothing but a Group Policy refresh is changed.
+$ALGpRefreshProbe = {
+    param([bool]$Refresh, [int]$WaitSeconds)
+    $o = [ordered]@{ Computer = $env:COMPUTERNAME; Started = (Get-Date).ToString('s'); Gpupdate = @(); GpupdateExit = @() }
+    if ($Refresh) {
+        for ($Pass = 1; $Pass -le 2; $Pass++) {
+            $Text = (& "$env:windir\System32\gpupdate.exe" /target:computer /force 2>&1 | Out-String)
+            $o.GpupdateExit += [int]$LASTEXITCODE
+            $o.Gpupdate += "gpupdate /target:computer /force - pass $Pass of 2 at $((Get-Date).ToString('HH:mm:ss')), exit code $LASTEXITCODE`r`n$($Text.Trim())"
+            if ($Pass -eq 1) { Start-Sleep -Seconds $WaitSeconds }
+        }
+    }
+    $o.GpresultText = (& "$env:windir\System32\gpresult.exe" /scope computer /r 2>&1 | Out-String)
+    $o.GpresultTextExit = [int]$LASTEXITCODE
+    $Tmp = Join-Path $env:TEMP ('AL-gpresult-' + [guid]::NewGuid().ToString('N') + '.xml')
+    $null = & "$env:windir\System32\gpresult.exe" /scope computer /x $Tmp /f 2>&1
+    $o.GpresultXmlExit = [int]$LASTEXITCODE
+    $o.GpresultXml = ''
+    if (Test-Path -LiteralPath $Tmp) { $o.GpresultXml = [IO.File]::ReadAllText($Tmp); [IO.File]::Delete($Tmp) }
+    $Svc = Get-CimInstance Win32_Service -Filter "Name='AppIDSvc'"
+    $o.AppIdSvc = "$($Svc.State)/$($Svc.StartMode)"
+    $o.EffectiveXml = ''; $o.Effective = ''
+    try {
+        $o.EffectiveXml = "$(Get-AppLockerPolicy -Effective -Xml)"
+        [xml]$Eff = $o.EffectiveXml
+        $o.Effective = (@($Eff.AppLockerPolicy.RuleCollection | Sort-Object Type | ForEach-Object { "$($_.Type)=$($_.EnforcementMode)($(@($_.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -ne 'RuleCollectionExtensions' }).Count))" }) -join ', ')
+        if (-not $o.Effective) { $o.Effective = 'empty (no rule collection)' }
+    }
+    catch { $o.Effective = "could not be read: $($_.Exception.Message)" }
+    $o.PolicyEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL'; Id = 8000, 8001 } -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object {
+            $Status = ''
+            if ($_.Id -eq 8000) { try { $Status = "$(([xml]($_.ToXml())).Event.EventData.Data | Where-Object { $_.Name -eq 'Status' } | ForEach-Object { $_.'#text' })" } catch { } }
+            [pscustomobject]@{ Time = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'); Id = $_.Id; Status = $Status; Message = ("$($_.Message)".Trim() -replace '\s+', ' ') }
+        })
+    $o.Finished = (Get-Date).ToString('s')
+    [pscustomobject]$o
+}
+
+# Runs the probe on a server over WinRM, or in this process when the server is this computer (-Local forces that); returns its object
+function Invoke-ALGpRefresh([string]$ComputerName, [bool]$Refresh, [int]$WaitSeconds = 10, [switch]$Local) {
+    if ($Local -or (Test-ALLocalComputer $ComputerName)) { return (& $ALGpRefreshProbe $Refresh $WaitSeconds) }
+    return (Invoke-Command -ComputerName $ComputerName -ScriptBlock $ALGpRefreshProbe -ArgumentList $Refresh, $WaitSeconds -ErrorAction Stop)
+}
+
+# Writes the raw outputs for one server to $Folder: <server>-gpresult.txt (Application Identity, the effective policy, the newest
+# policy events, every gpupdate pass with its output, the gpresult text report) and <server>-gpresult.xml (the RSoP report, UTF-16
+# as gpresult writes it). Returns the text file's path.
+function Save-ALGpResult($Raw, [string]$Folder) {
+    New-Item -Path $Folder -ItemType Directory -Force -WhatIf:$false | Out-Null
+    $Name = "$($Raw.Computer)" -replace '[^A-Za-z0-9.-]', '_'
+    $Txt = Join-Path $Folder "$Name-gpresult.txt"
+    $Lines = New-Object System.Collections.Generic.List[string]
+    $Lines.Add("Computer: $($Raw.Computer)   collected $($Raw.Started) - $($Raw.Finished)")
+    $Lines.Add("Application Identity (AppIDSvc): $($Raw.AppIdSvc)")
+    $Lines.Add("Effective AppLocker policy: $($Raw.Effective)")
+    $Lines.Add('Newest AppLocker policy events (8001 = policy applied, 8000 = AppID policy conversion failed):')
+    if (@($Raw.PolicyEvents).Count) { foreach ($E in @($Raw.PolicyEvents)) { $Lines.Add("  $($E.Time) event $($E.Id)$(if ("$($E.Status)" -ne '') { " status $($E.Status) ($(ConvertTo-ALWin32Message $E.Status))" }): $($E.Message)") } }
+    else { $Lines.Add('  none') }
+    foreach ($G in @($Raw.Gpupdate)) { $Lines.Add(''); $Lines.Add("==== $G") }
+    $Lines.Add(''); $Lines.Add("==== gpresult /scope computer /r (exit code $($Raw.GpresultTextExit))"); $Lines.Add("$($Raw.GpresultText)".TrimEnd())
+    $Lines.Add(''); $Lines.Add("==== gpresult /scope computer /x (exit code $($Raw.GpresultXmlExit)): $Name-gpresult.xml")
+    $Body = (($Lines.ToArray() -join "`r`n") -replace '\r?\n', "`r`n") + "`r`n"
+    [IO.File]::WriteAllText($Txt, $Body, (New-Object System.Text.UTF8Encoding $false))
+    if ("$($Raw.GpresultXml)".Trim()) { [IO.File]::WriteAllText((Join-Path $Folder "$Name-gpresult.xml"), "$($Raw.GpresultXml)", (New-Object System.Text.UnicodeEncoding $false, $true)) }
+    return $Txt
+}
+
+# The English text report of gpresult /scope computer /r: the applied GPO names (in the order gpresult lists them), the GPOs that
+# were filtered out with their reason, and the "last applied" / "applied from" lines. Everything is empty when the headings are not
+# found (another display language, or no report). Only the COMPUTER SETTINGS part is read; the user part has the same headings.
+function ConvertFrom-ALGpResultText([string]$Text) {
+    $Applied = New-Object System.Collections.Generic.List[string]
+    $Not = New-Object System.Collections.Generic.List[object]
+    $Last = ''; $From = ''
+    $Lines = @("$Text" -split '\r?\n')
+    $Start = 0
+    for ($I = 0; $I -lt $Lines.Count; $I++) { if ($Lines[$I] -match '^\s*COMPUTER SETTINGS\s*$') { $Start = $I; break } }
+    $Section = ''; $Pending = ''
+    for ($I = $Start; $I -lt $Lines.Count; $I++) {
+        $L = $Lines[$I]
+        if ($L -match '^\s*USER SETTINGS\s*$') { break }
+        if ($L -match '^\s*Last time Group Policy was applied:\s*(.+?)\s*$') { $Last = $Matches[1]; continue }
+        if ($L -match '^\s*Group Policy was applied from:\s*(.+?)\s*$') { $From = $Matches[1]; continue }
+        if ($L -match '^\s*Applied Group Policy Objects\s*$') { $Section = 'applied'; continue }
+        if ($L -match '^\s*The following GPOs were not applied because they were filtered out\s*$') { $Section = 'not'; continue }
+        if ($L -match '^\s*The computer is a part of the following security groups\s*$') { $Section = ''; continue }
+        if ($L -match '^\s*-{5,}\s*$') { continue }
+        if ($Section -eq 'applied') {
+            if ($L.Trim() -eq '') { if ($Applied.Count) { $Section = '' }; continue }
+            if ($L -match '^\s*N/A\s*$') { $Section = ''; continue }
+            $Applied.Add($L.Trim())
+        }
+        elseif ($Section -eq 'not') {
+            if ($L.Trim() -eq '') { continue }
+            if ($L -match '^\s*Filtering:\s*(.+?)\s*$') { if ($Pending) { $Not.Add([pscustomobject]@{ Name = $Pending; Reason = $Matches[1] }); $Pending = '' }; continue }
+            $Pending = $L.Trim()
+        }
+    }
+    if ($Pending) { $Not.Add([pscustomobject]@{ Name = $Pending; Reason = '' }) }
+    [pscustomobject]@{ Applied = $Applied.ToArray(); NotApplied = $Not.ToArray(); LastApplied = $Last; AppliedFrom = $From }
+}
+
+# What gpresult reported for the computer, from the RSoP XML (gpresult /x; language-independent) with the text report (gpresult /r)
+# as the fallback and for the "last applied" lines:
+#   Gpos        every GPO Group Policy considered: Name, Id, Applied, AppliedOrder, Reason when not applied (Disabled (Link),
+#               Disabled (GPO), Denied (Security), Not Applied (Empty) ...), VersionDirectory / VersionSysvol, Link (the OU, domain
+#               or site it is linked to), LinkEnabled
+#   Applied     the names of the applied GPOs, highest precedence first (the order gpresult lists them)
+#   Extensions  the client-side extensions that ran: Name, Id, Error (0 = success), EndTime
+#   LastApplied / AppliedFrom   from the text report when it is in English, otherwise empty
+#   Source      'xml', 'text' or '' (no readable report)
+function ConvertFrom-ALGpResult([string]$Xml, [string]$Text) {
+    $Gpos = New-Object System.Collections.Generic.List[object]
+    $Ext = New-Object System.Collections.Generic.List[object]
+    $Source = ''
+    $Doc = $null
+    if ("$Xml".Trim()) {
+        $Doc = New-Object System.Xml.XmlDocument
+        try { $Doc.LoadXml("$Xml".Trim()) } catch { $Doc = $null }
+    }
+    if ($Doc) {
+        $Ns = New-Object System.Xml.XmlNamespaceManager $Doc.NameTable
+        $Ns.AddNamespace('r', 'http://www.microsoft.com/GroupPolicy/Rsop')
+        $Ns.AddNamespace('t', 'http://www.microsoft.com/GroupPolicy/Types')
+        $Val = { param($N, $X) $F = $N.SelectSingleNode($X, $Ns); if ($F) { "$($F.InnerText)".Trim() } else { '' } }
+        $Results = $Doc.SelectSingleNode('/r:Rsop/r:ComputerResults', $Ns)
+        if ($Results) {
+            $Source = 'xml'
+            foreach ($G in @($Results.SelectNodes('r:GPO', $Ns))) {
+                $Order = 0; [void][int]::TryParse((& $Val $G 'r:Link/r:AppliedOrder'), [ref]$Order)
+                $LinkEnabled = ((& $Val $G 'r:Link/r:Enabled') -ne 'false')
+                $Enabled = ((& $Val $G 'r:Enabled') -ne 'false')
+                $Valid = ((& $Val $G 'r:IsValid') -ne 'false')
+                $Filter = ((& $Val $G 'r:FilterAllowed') -ne 'false')
+                $Denied = ((& $Val $G 'r:AccessDenied') -eq 'true')
+                $VerAd = 0; [void][int]::TryParse((& $Val $G 'r:VersionDirectory'), [ref]$VerAd)
+                $VerSysvol = 0; [void][int]::TryParse((& $Val $G 'r:VersionSysvol'), [ref]$VerSysvol)
+                $Applied = ($Order -gt 0)
+                $Reason = if ($Applied) { '' } elseif (-not $LinkEnabled) { 'Disabled (Link)' } elseif (-not $Enabled) { 'Disabled (GPO)' } elseif ($Denied) { 'Denied (Security)' } elseif (-not $Valid) { 'Not Applied (Invalid)' } elseif (-not $Filter) { 'Denied (WMI Filter)' } elseif ($VerAd -eq 0) { 'Not Applied (Empty)' } else { 'Not Applied (Unknown Reason)' }
+                $Gpos.Add([pscustomobject]@{ Name = (& $Val $G 'r:Name'); Id = (& $Val $G 'r:Path/t:Identifier'); Applied = $Applied; AppliedOrder = $Order; Reason = $Reason; VersionDirectory = $VerAd; VersionSysvol = $VerSysvol; Link = (& $Val $G 'r:Link/r:SOMPath'); LinkEnabled = $LinkEnabled })
+            }
+            foreach ($E in @($Results.SelectNodes('r:ExtensionStatus', $Ns))) {
+                $Err = 0; [void][int]::TryParse((& $Val $E 'r:Error'), [ref]$Err)
+                $Ext.Add([pscustomobject]@{ Name = (& $Val $E 'r:Name'); Id = (& $Val $E 'r:Identifier'); Error = $Err; EndTime = (& $Val $E 'r:EndTime') })
             }
         }
-        catch { "$C : refresh FAILED - $($_.Exception.Message)" }
     }
+    $T = ConvertFrom-ALGpResultText $Text
+    if ($Source -ne 'xml' -and ($T.Applied.Count -or $T.NotApplied.Count)) {
+        $Source = 'text'
+        $N = $T.Applied.Count
+        foreach ($Name in $T.Applied) { $Gpos.Add([pscustomobject]@{ Name = $Name; Id = ''; Applied = $true; AppliedOrder = $N; Reason = ''; VersionDirectory = 0; VersionSysvol = 0; Link = ''; LinkEnabled = $true }); $N-- }
+        foreach ($X in $T.NotApplied) { $Gpos.Add([pscustomobject]@{ Name = $X.Name; Id = ''; Applied = $false; AppliedOrder = 0; Reason = $X.Reason; VersionDirectory = 0; VersionSysvol = 0; Link = ''; LinkEnabled = ($X.Reason -notlike 'Disabled (Link)*') }) }
+    }
+    [pscustomobject]@{
+        Gpos        = $Gpos.ToArray()
+        Applied     = @($Gpos | Where-Object { $_.Applied } | Sort-Object AppliedOrder -Descending | ForEach-Object { $_.Name })
+        Extensions  = $Ext.ToArray()
+        LastApplied = $T.LastApplied
+        AppliedFrom = $T.AppliedFrom
+        Source      = $Source
+    }
+}
+
+# A GPO whose link is disabled and that the computer never applied is listed by gpresult under its GUID, not its name (the client has
+# never read it). Given the GUIDs of the GPOs this toolkit manages ({GUID} -> name), such entries get their name back, so the rows and
+# the verdict can name them. Returns the report (changed in place).
+function Resolve-ALGpoNames($Report, [hashtable]$IdToName) {
+    if (-not $IdToName -or -not $IdToName.Count) { return $Report }
+    $Map = @{}
+    foreach ($K in @($IdToName.Keys)) { if ("$K".Trim('{}') -and $IdToName[$K]) { $Map['{' + "$K".Trim('{}').ToUpper() + '}'] = "$($IdToName[$K])" } }
+    foreach ($G in @($Report.Gpos)) {
+        $Id = '{' + "$($G.Id)".Trim('{}').ToUpper() + '}'
+        $ByName = '{' + "$($G.Name)".Trim('{}').ToUpper() + '}'
+        if ($Map.ContainsKey($Id) -and ("$($G.Name)" -eq '' -or $ByName -eq $Id)) { $G.Name = $Map[$Id] }
+        elseif ($Map.ContainsKey($ByName)) { $G.Name = $Map[$ByName] }
+    }
+    $Report.Applied = @($Report.Gpos | Where-Object { $_.Applied } | Sort-Object AppliedOrder -Descending | ForEach-Object { $_.Name })
+    return $Report
+}
+
+# Judges a gpresult report against the AppLocker mode the links are meant to give the computer: Audit = the Audit GPO applied and the
+# Enforce GPO not, Enforce = the other way round, Off = neither. Returns Ok, Expected, Found and Problems (one line each).
+function Get-ALGpVerdict($Report, [string]$Mode, [string]$AuditName, [string]$EnforceName) {
+    $Problems = New-Object System.Collections.Generic.List[string]
+    $Applied = @($Report.Applied)
+    $Want = @(switch ($Mode) { 'Audit' { $AuditName } 'Enforce' { $EnforceName } })
+    $NotWant = @(@($AuditName, $EnforceName) | Where-Object { $_ -notin $Want })
+    foreach ($N in $Want) {
+        if ($Applied -notcontains $N) {
+            $G = @($Report.Gpos | Where-Object { $_.Name -eq $N }) | Select-Object -First 1
+            $Problems.Add("'$N' is not applied ($(if ($G) { $G.Reason } else { 'not linked to an OU this computer is in, or the link not replicated yet' }))")
+        }
+    }
+    foreach ($N in $NotWant) {
+        if ($Applied -contains $N) { $Problems.Add("'$N' is applied but must not be$(if ($Mode -eq 'Off') { ' (mode Off)' } else { " (both AppLocker GPOs apply - run 3_AL_set_mode.ps1 -Mode $Mode)" })") }
+    }
+    if (-not $Report.Source) { $Problems.Add('gpresult gave no readable report') }
+    [pscustomobject]@{
+        Ok       = ($Problems.Count -eq 0)
+        Expected = $(if ($Want.Count) { "$($Want -join ', ') applied, $($NotWant -join ', ') not applied" } else { "neither $($NotWant -join ' nor ') applied" })
+        Found    = $(if ($Applied.Count) { $Applied -join ', ' } else { 'no GPO applied' })
+        Problems = $Problems.ToArray()
+    }
+}
+
+# The text of a Win32 error code as Windows writes it, for the Status of AppLocker event 8000 and the Error of a client-side extension:
+# 2 -> 'The system cannot find the file specified', '0x8007007E' -> 'The specified module could not be found'. An NTSTATUS value
+# (0xC...) and a COM HRESULT are named where this toolkit knows them; anything else is returned as given.
+function ConvertTo-ALWin32Message([object]$Code) {
+    $Text = "$Code".Trim()
+    $N = [int64]0
+    if ($Text -match '^0[xX]([0-9A-Fa-f]{1,8})$') { $N = [Convert]::ToInt64($Matches[1], 16) }
+    elseif ($Text -match '^-?\d{1,10}$') { $N = [int64]$Text; if ($N -lt 0) { $N += 4294967296 } }
+    else { return $Text }
+    if ($N -eq 0) { return 'The operation completed successfully' }
+    if ($N -ge 3221225472 -and $N -le 3489660927) {
+        $Known = @{ 'C0000001' = 'STATUS_UNSUCCESSFUL'; 'C0000002' = 'STATUS_NOT_IMPLEMENTED'; 'C000000D' = 'STATUS_INVALID_PARAMETER'; 'C0000017' = 'STATUS_NO_MEMORY'; 'C0000022' = 'STATUS_ACCESS_DENIED'; 'C0000034' = 'STATUS_OBJECT_NAME_NOT_FOUND'; 'C000003A' = 'STATUS_OBJECT_PATH_NOT_FOUND'; 'C00000BB' = 'STATUS_NOT_SUPPORTED'; 'C0000225' = 'STATUS_NOT_FOUND' }
+        $Hex = $N.ToString('X8')
+        return "NTSTATUS 0x$Hex$(if ($Known.ContainsKey($Hex)) { ' ' + $Known[$Hex] })"
+    }
+    $Win32 = if ($N -ge 2147942400 -and $N -le 2148007935) { $N - 2147942400 } elseif ($N -lt 65536) { $N } else { -1 }
+    if ($Win32 -ge 0) { return (New-Object System.ComponentModel.Win32Exception ([int]$Win32)).Message }
+    $Com = @{ '80004001' = 'E_NOTIMPL (Not implemented)'; '80004002' = 'E_NOINTERFACE (No such interface supported)'; '80004003' = 'E_POINTER (Invalid pointer)'; '80004004' = 'E_ABORT (Operation aborted)'; '80004005' = 'E_FAIL (Unspecified error)'; '8000FFFF' = 'E_UNEXPECTED (Catastrophic failure)'; '80090016' = 'NTE_BAD_KEYSET (Keyset does not exist)'; '800B0100' = 'TRUST_E_NOSIGNATURE (No signature was present in the subject)'; '800B0101' = 'CERT_E_EXPIRED (A required certificate is not within its validity period)'; '800B0109' = 'CERT_E_UNTRUSTEDROOT (A certificate chain processed, but terminated in a root certificate which is not trusted)' }
+    $Hex = $N.ToString('X8')
+    return "HRESULT 0x$Hex$(if ($Com.ContainsKey($Hex)) { ' ' + $Com[$Hex] })"
+}
+
+# Adds the gpresult rows for one server to a results list. $Mode = Audit / Enforce / Off judges which AppLocker GPO must be applied
+# (FAIL otherwise); 'Any' only reports. Rows: "GPO applied" (every GPO, with the reason for each one not applied), "GPO processing"
+# (the Registry extension writes the AppLocker rules, the Security extension the Application Identity service setting), "AppLocker
+# policy events" (WARN when the newest is 8000, a conversion failure: the rules are not loaded), "Group Policy" (when and from which
+# DC it was last applied, and where the raw gpupdate / gpresult output was saved).
+function Add-ALGpResults($List, [string]$Computer, $Raw, $Report, [string]$Mode, [string]$AuditName, [string]$EnforceName, [string]$File) {
+    $NotApplied = @($Report.Gpos | Where-Object { -not $_.Applied -and $_.Name -ne 'Local Group Policy' } | ForEach-Object { "$($_.Name) ($($_.Reason))" })
+    $Found = "applied: $(if (@($Report.Applied).Count) { $Report.Applied -join ', ' } else { 'none' })$(if ($NotApplied.Count) { "; not applied: $($NotApplied -join ', ')" })"
+    if ($Mode -eq 'Any') {
+        if ($Report.Source) { Add-ALResult $List 'INFO' "GPO applied $Computer" $Found } else { Add-ALResult $List 'WARN' "GPO applied $Computer" 'gpresult gave no readable report' }
+    }
+    else {
+        $V = Get-ALGpVerdict $Report $Mode $AuditName $EnforceName
+        if ($V.Ok) { Add-ALResult $List 'OK' "GPO applied $Computer" "$Found - as expected for $Mode ($($V.Expected))" }
+        else { Add-ALResult $List 'FAIL' "GPO applied $Computer" "$($V.Problems -join '; ') - $Found - expected for ${Mode}: $($V.Expected)" }
+    }
+    $Ours = @($Report.Extensions | Where-Object { $_.Id -in '{35378EAC-683F-11D2-A89A-00C04FBBCFA2}', '{827D319E-6EAC-11D2-A4EA-00C04F79F83A}' })
+    if ($Ours.Count) {
+        $Bad = @($Ours | Where-Object { $_.Error -ne 0 })
+        $Status = if (-not $Bad.Count) { 'OK' } elseif ($Mode -eq 'Off') { 'WARN' } else { 'FAIL' }
+        Add-ALResult $List $Status "GPO processing $Computer" ((@($Ours | ForEach-Object { "$($_.Name) extension $(if ($_.Error -eq 0) { 'OK' } else { "error $($_.Error) ($(ConvertTo-ALWin32Message $_.Error))" }) at $($_.EndTime)" })) -join '; ')
+    }
+    elseif ($Report.Source -eq 'xml') { Add-ALResult $List 'INFO' "GPO processing $Computer" 'the Registry and Security extensions have not run on this computer yet (no GPO with such settings has applied so far)' }
+    $Newest = @($Raw.PolicyEvents) | Select-Object -First 1
+    if (-not $Newest) {
+        # Windows Server 2022 logs the 8001 a minute or two after the refresh that loaded the rules (seen in the lab); 2025 logs it at once
+        if ("$($Raw.Effective)" -match '=(Enabled|AuditOnly)\([1-9]') { Add-ALResult $List 'INFO' "AppLocker policy events $Computer" "none in the EXE and DLL log yet - the effective policy is loaded ($($Raw.Effective)); the 8001 event can follow the refresh by a minute or two" }
+        else { Add-ALResult $List 'INFO' "AppLocker policy events $Computer" 'none in the EXE and DLL log: no AppLocker policy has been applied or rejected on this computer yet' }
+    }
+    elseif ($Newest.Id -eq 8000) { Add-ALResult $List 'WARN' "AppLocker policy events $Computer" "newest is 8000 at $($Newest.Time): AppID policy conversion failed, status $($Newest.Status) ($(ConvertTo-ALWin32Message $Newest.Status)) - the rules are NOT loaded. Run 7_AL_diagnose.ps1 (README, Appendix D)" }
+    else { Add-ALResult $List 'OK' "AppLocker policy events $Computer" "newest is 8001 at $($Newest.Time): the AppLocker policy was applied successfully$(if (@($Raw.PolicyEvents | Where-Object { $_.Id -eq 8000 }).Count) { ' (older 8000 conversion failures are in the log)' })" }
+    Add-ALResult $List 'INFO' "Group Policy $Computer" "last applied $(if ($Report.LastApplied) { $Report.LastApplied } else { '(not in the report)' }) from $(if ($Report.AppliedFrom) { $Report.AppliedFrom } else { '(not in the report)' }); raw gpupdate / gpresult output: $File"
 }

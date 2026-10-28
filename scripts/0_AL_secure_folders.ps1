@@ -129,7 +129,7 @@ try {
     }
     foreach ($W in $Work) {
         if (-not $PSCmdlet.ShouldProcess($W.Computer, "SYSTEM + Administrators only on: $(@($W.Create) + @($W.Repair) -join ', ')")) { continue }
-        try { Invoke-Command -ComputerName $W.Computer -ScriptBlock $Apply -ArgumentList @($W.Create), @($W.Repair) -ErrorAction Stop | ForEach-Object { Write-Host $_ -ForegroundColor $(if ("$_" -match 'CHECK FAILED') { 'Red' } else { 'Green' }) } }
+        try { Invoke-ALOn $W.Computer $Apply (@($W.Create), @($W.Repair)) | ForEach-Object { Write-Host $_ -ForegroundColor $(if ("$_" -match 'CHECK FAILED') { 'Red' } else { 'Green' }) } }
         catch { Write-Host "$($W.Computer) : FAILED - $($_.Exception.Message)" -ForegroundColor Red }
     }
 }
