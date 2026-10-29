@@ -10,10 +10,12 @@
     settings write, and the policy conversion check (the conditional ACE of every rule form, the size estimate, the 64 KB ACL / ACE
     limits, the result rows, the status hint, the policy store rows, the exception breakdown, CollapseExceptionsUnder; on Windows
     also Windows' own SDDL parser and the store probe on this computer). Every test creates what it needs under a temporary folder that is deleted at the end. With -BuildFolder it also
-    compares New-ALDeployXml against a real build and checks that adding exceptions to it changes only the C:\Admin rules.
+    compares New-ALDeployXml against a real build and checks that adding exceptions to it changes only the C:\Admin rules (nothing
+    in a build without them).
 
 .PARAMETER BuildFolder
-    Optional: a build folder (Outputs\<profile>\<timestamp>) to check the deploy XML conversion against its *-Deploy.xml files.
+    Optional: a build folder (Outputs\<profile>\<timestamp>) to check the deploy XML conversion against its *-Deploy.xml files, with
+    the DLL and Appx switches the deployed files were written with.
 
 .INPUTS
     None. Nothing can be piped to this script.
@@ -623,16 +625,25 @@ USER SETTINGS
             $Src = Get-ChildItem -LiteralPath $BuildFolder -Filter "AppLockerRules-*-$M.xml" | Select-Object -First 1
             $Old = Join-Path $BuildFolder ($Src.BaseName + '-Deploy.xml')
             $New = Join-Path $Tmp "$M-Deploy.xml"
-            [void](New-ALDeployXml -SourceXml $Src.FullName -Mode $M -DllRules $false -OutFile $New)
-            if (Test-Path -LiteralPath $Old) { Assert "deploy XML: real $M build gives the same file as the deployed one" ((Get-FileHash -LiteralPath $New).Hash -eq (Get-FileHash -LiteralPath $Old).Hash) }
+            if (Test-Path -LiteralPath $Old) {
+                # The deployed file was written with the EnableDllRules / EnableAppxRules of its day: a switched-off collection is NotConfigured in it
+                $Deployed = [xml](Get-Content -LiteralPath $Old -Raw)
+                $On = { param($T) @($Deployed.AppLockerPolicy.RuleCollection | Where-Object { $_.Type -eq $T -and $_.EnforcementMode -ne 'NotConfigured' }).Count -gt 0 }
+                [void](New-ALDeployXml -SourceXml $Src.FullName -Mode $M -DllRules (& $On 'Dll') -OutFile $New -AppxRules (& $On 'Appx'))
+                Assert "deploy XML: real $M build gives the same file as the deployed one" ((Get-FileHash -LiteralPath $New).Hash -eq (Get-FileHash -LiteralPath $Old).Hash) "Dll $(& $On 'Dll'), Appx $(& $On 'Appx')"
+            }
         }
-        # Exceptions on a real AaronLocker build: only the C:\Admin rules change, the rule counts do not
+        # Exceptions on a real AaronLocker build: only the C:\Admin rules change, the rule counts do not. A build without a C:\Admin\* rule
+        # (ExtraAllowedPaths empty, as shipped) must come out unchanged
         $Copy = Join-Path $Tmp 'real-Enforce.xml'
         Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $BuildFolder -Filter 'AppLockerRules-*-Enforce.xml' | Select-Object -First 1).FullName -Destination $Copy
         $Before = Get-ALPolicySummary ([xml](Get-Content -LiteralPath $Copy -Raw))
+        $HasAdmin = $null -ne (Get-ALRuleExceptions ([xml](Get-Content -LiteralPath $Copy -Raw)) 'C:\Admin\*')
+        $BeforeHash = (Get-FileHash -LiteralPath $Copy).Hash
         $N = Add-ALPathExceptions $Copy @{ 'C:\Admin\*' = @('C:\Admin\Shared\*') }
         $After = New-Object System.Xml.XmlDocument; $After.Load($Copy)
-        Assert 'exceptions: real build - C:\Admin rules in Exe + Script excepted, nothing else changed' ($N -ge 2 -and (Get-ALPolicySummary $After) -eq $Before -and ((Get-ALRuleExceptions $After 'C:\Admin\*') -join ',') -eq 'C:\Admin\Shared\*') "rules changed: $N"
+        if ($HasAdmin) { Assert 'exceptions: real build - C:\Admin rules in Exe + Script excepted, nothing else changed' ($N -ge 2 -and (Get-ALPolicySummary $After) -eq $Before -and ((Get-ALRuleExceptions $After 'C:\Admin\*') -join ',') -eq 'C:\Admin\Shared\*') "rules changed: $N" }
+        else { Assert 'exceptions: real build without a C:\Admin\* rule - nothing changed' ($N -eq 0 -and (Get-FileHash -LiteralPath $Copy).Hash -eq $BeforeHash) "rules changed: $N" }
         # The merge self-check against a real AaronLocker build: its own scan, mapped like AaronLocker maps it, is entirely in its rules
         $RealScan = Join-Path $BuildFolder 'ScanResults'
         if (Test-Path -LiteralPath (Join-Path $RealScan 'Writable_windir.txt')) {

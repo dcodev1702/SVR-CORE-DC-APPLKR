@@ -48,7 +48,7 @@
 | Who | May run |
 |---|---|
 | **SYSTEM and elevated administrators** | Everything (AppLocker default rule *All files* for `BUILTIN\Administrators`). |
-| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\SYSVOL` and `\\<domain>\NETLOGON` (logon scripts), the Defender platform folder, `C:\Admin\*`, and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`**. |
+| **Everyone else** (non-admin accounts, members of Server/Backup/Print/Account Operators, and **non-elevated** administrator sessions) | Files under `C:\Windows` and `C:\Program Files*` — **except** the user-writable subfolders the scan found (e.g. `C:\Windows\Temp`, `C:\Windows\Tasks`, `SYSVOL\domain\Policies`) and a deny list of bypass tools (`cipher`, `runas`, `WMIC`, `MSBuild`, `InstallUtil`, `RegAsm`, `RegSvcs`, `PresentationHost`, `Microsoft.Workflow.Compiler`) — plus `\\<domain>\SYSVOL` and `\\<domain>\NETLOGON` (logon scripts), the Defender platform folder, the `ExtraAllowedPaths` folders (e.g. `C:\Admin\*`; none in the shipped settings), and Microsoft-signed installers and scripts. Nothing else — **not `C:\Temp`, not a user profile, not `C:\Sysmon`**. |
 
 ### Who AppLocker restricts here
 
@@ -59,13 +59,13 @@
 > [!WARNING]
 > **Be realistic about what this protects.** Elevated administrators and SYSTEM may run anything, so AppLocker here stops *non-admin* and *non-elevated* code from running unapproved software — it does **not** contain an administrator. It satisfies WN25-00-000080 (an allowlist in a deny-by-default configuration), but it is not a containment boundary on a DC. Keep the administrative tier tight.
 
-### The deployed baseline (lab build)
+### The deployed baseline (shipped settings)
 
 | Collection | Mode in Audit / Enforce | Rules | What they are |
 |---|---|---|---|
-| **Exe** | AuditOnly / **Enabled** | 10 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, `\\<domain>\sysvol\*`, Defender platform folder, `C:\Admin\*` · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) |
+| **Exe** | AuditOnly / **Enabled** | 9 | Administrators: all files · Everyone: `%PROGRAMFILES%\*`, `%WINDIR%\*` (minus user-writable folders and the deny list), `\\<domain>\netlogon\*`, `\\<domain>\sysvol\*`, Defender platform folder · Microsoft Teams publisher (AaronLocker default, harmless) · deny old BgInfo · AaronLocker build-timestamp rule (inert) · **+1 rule per `ExtraAllowedPaths` entry** (e.g. `C:\Admin\*`) |
 | **Msi** | AuditOnly / **Enabled** | 5 | `%WINDIR%\ccmcache\*` (MECM), `%WINDIR%\Installer\*`, Administrators: all, Microsoft-signed MSI, Teams |
-| **Script** | AuditOnly / **Enabled** | 9 | Same paths as Exe, Administrators: all, Microsoft-signed scripts, Teams |
+| **Script** | AuditOnly / **Enabled** | 8 | Same paths as Exe (+1 rule per `ExtraAllowedPaths` entry), Administrators: all, Microsoft-signed scripts, Teams |
 | **Appx** | **NotConfigured** / **NotConfigured** | 0 | **Packaged app rules off** — not required by the STIG item; a Server Core DC runs no packaged apps (`EnableAppxRules = $false`) |
 | **Dll** | **NotConfigured** / **NotConfigured** | 0 | **DLL rules off** — not required by the STIG item (`EnableDllRules = $false`) |
 
@@ -82,7 +82,7 @@ SVR-CORE-DC-APPLKR\                     copy anywhere on the management computer
   scripts\         AL-Settings.psd1  AL-Common.ps1  0_...  1_...  2_...  3_...  4_...  5_...  6_...  7_...  8_AL_reset.ps1
   Customizations\CustomizationInputs\   overlay for AaronLocker (never edit the toolkit itself):
                    GetExeFilesToDenyList.ps1  Server Core fix (lists only deny-list files that exist)
-                   GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (C:\Admin\*)
+                   GetSafePathsToAllow.ps1    SYSVOL + NETLOGON (AaronLocker defaults) + ExtraAllowedPaths (e.g. C:\Admin\*)
                    KnownAdmins.ps1            adds the KnownAdmins setting
   AaronLocker\     microsoft/AaronLocker (MIT, unmodified)  +  AaronLocker\AccessChk.exe (Sysinternals, 64-bit)
   tests\           Test-AL.ps1 (291 unit tests, no network, both PowerShell editions; 297 with -BuildFolder)
@@ -142,12 +142,12 @@ Every script reads `scripts\AL-Settings.psd1`. Edit it once; the scripts refuse 
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JSLC_AppLocker_AUDIT_Domain_Controller` / `JSLC_AppLocker_ENFORCE_Domain_Controller` |
+| `AuditGpoName` / `EnforceGpoName` | The two GPOs | `JMSC_AppLocker_AUDIT_Domain_Controller` / `JMSC_AppLocker_ENFORCE_Domain_Controller` |
 | `TargetOUs` | OUs whose servers get the policy | empty = **Domain Controllers** |
 | `ReferenceServer` | The DC the baseline is built on. `PDC` = the PDC emulator of the domain the scripts run in, found at run time (pre-flight and the build print which DC it is), so one settings file serves every domain and enclave. Or the FQDN of one of **your** DCs; another server class needs an FQDN in its own settings file | `PDC` |
 | `ExtraReferenceServers` | DCs of **another Windows Server version** in scope, one per version (e.g. a Server 2022 DC next to 2025 DCs). The build scans them too and merges every user-writable folder and denied tool they find: stricter only ([SERVER-2022.md](docs/SERVER-2022.md#dcs-of-both-versions)) | empty |
-| `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | `C:\Admin\*` |
-| `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing | `C:\Admin` |
+| `ExtraAllowedPaths` | Extra folders every account may run from. Each should be changeable by administrators only: the build checks every DC and **leaves out or excepts** what a non-admin can change — it never stops on it | empty (`C:\Admin\*` is the commented-out example) |
+| `SecureFolders` | Folders `0_AL_secure_folders.ps1` creates administrators-only when missing. Every `ExtraAllowedPaths` folder you create yourself belongs here | empty (`C:\Admin` is the commented-out example) |
 | `KnownAdmins` | Your own administrators groups (DOMAIN\Group or SID) — `0_AL_known_admins.ps1` fills it from an OU or a group, see [section 11](#11-who-counts-as-an-administrator) | empty |
 | `AccessChkSha256` | Pinned hash of the shipped AccessChk | `843B6B1D...F9F3` |
 | `EnableDllRules` | `$false` = DLL collection off | `$false` |
@@ -174,7 +174,7 @@ Every script carries comment-based help: `Get-Help .\<script>.ps1 -Full` shows i
 | 1 | `0_AL_get_toolkit.ps1` | Verifies AaronLocker + AccessChk (signature, 64-bit, pinned SHA-256) | nothing (`-Download` / import only when asked) |
 | 2 | `0_AL_known_admins.ps1 -Path <OU or group>` | Optional: surveys the OU of your administrator accounts (shows their groups), or turns your administrators groups (canonical name, as ADUC shows it) into `KnownAdmins` entries; `-Update` writes them | nothing (`-Update`: `AL-Settings.psd1`, after a backup) |
 | 2 | `0_AL_pre-flight.ps1` | Modules, rights, OUs, toolkit, WinRM, language mode, execution policy, existing AppLocker policy, **MECM**, **Nessus**, services/tasks outside the allowed folders, **`C:\Admin` permissions**, **Windows Server version of every DC vs the reference DCs**, **PowerShell 2.0** | read-only |
-| 3 | `0_AL_secure_folders.ps1` | Creates a missing `C:\Admin` administrators-only; reports a writable one | DCs (only a **missing** folder; an existing one only with `-Fix`) |
+| 3 | `0_AL_secure_folders.ps1` | Creates a missing `SecureFolders` entry (e.g. `C:\Admin`) administrators-only; reports a writable one. Skip it while `SecureFolders` is empty (shipped): it stops with *no folders* and changes nothing | DCs (only a **missing** folder; an existing one only with `-Fix`) |
 | 4 | `1_AL_build_policy.ps1` | Builds the baseline on the reference DC (merging the scans of any `ExtraReferenceServers`), checks `C:\Admin` on every DC (leaves out / excepts what a non-admin can change), brings the XML back, reports how each collection converts (its size against the 64 KB an ACL can hold) | temporary folder on the reference DC (and each extra reference DC) |
 | 5 | `2_AL_create_gpos.ps1` | **Checks that both rule sets convert** (stops on one the DCs would reject with event 8000, status 1336), backs up, creates/updates the Audit + Enforce GPOs, reads the rules back, links new GPOs **disabled**, sizes the logs | domain (GPOs), DCs (log size) |
 | 6 | `3_AL_set_mode.ps1 -Mode Audit -Refresh` | Enables the Audit link, then on every DC: `gpupdate /force` twice with its output kept, `gpresult` (which GPOs applied, the Registry and Security extensions), Application Identity, the effective policy and the newest policy event, judged against the mode (table + CSV + raw files) | domain (links) |
@@ -228,7 +228,9 @@ It must end with **`Pre-flight: PASSED`**. Fix every **FAIL**; read every **WARN
 
 ### Step 3 — `C:\Admin`
 
-`C:\Admin\*` is allowed for **every** account. On Windows Server, `BUILTIN\Users` may create folders and files directly under `C:\`, and whoever creates a folder owns it (CREATOR OWNER: full control). So until an administrator creates `C:\Admin` with locked-down permissions, a user could create it first and plant code in it.
+Only when you allow an admin tools folder: the shipped settings leave `ExtraAllowedPaths` and `SecureFolders` empty, and the script then stops with *STOP: no folders* and changes nothing. To use `C:\Admin`, set `ExtraAllowedPaths = @('C:\Admin\*')` and `SecureFolders = @('C:\Admin')` (the commented-out lines in `AL-Settings.psd1`).
+
+Once listed, `C:\Admin\*` is allowed for **every** account. On Windows Server, `BUILTIN\Users` may create folders and files directly under `C:\`, and whoever creates a folder owns it (CREATOR OWNER: full control). So until an administrator creates `C:\Admin` with locked-down permissions, a user could create it first and plant code in it.
 
 ```powershell
 .\0_AL_secure_folders.ps1 -WhatIf     # survey only: what would be created or is writable
@@ -586,8 +588,8 @@ $d.Save('C:\Temp\Audit-Deploy.xml')          # same for the Enforce file
 **3. Create the GPO and write the rules:**
 ```powershell
 $pdc = (Get-ADDomain).PDCEmulator
-Backup-GPO -Name 'JSLC_AppLocker_AUDIT_Domain_Controller' -Path C:\Temp\GpoBackup -Server $pdc    # when it already exists
-$gpo = New-GPO -Name 'JSLC_AppLocker_AUDIT_Domain_Controller' -Server $pdc                         # or Get-GPO
+Backup-GPO -Name 'JMSC_AppLocker_AUDIT_Domain_Controller' -Path C:\Temp\GpoBackup -Server $pdc    # when it already exists
+$gpo = New-GPO -Name 'JMSC_AppLocker_AUDIT_Domain_Controller' -Server $pdc                         # or Get-GPO
 Set-AppLockerPolicy -XmlPolicy C:\Temp\Audit-Deploy.xml -Ldap "LDAP://$pdc/$($gpo.Path)"
 ```
 **4. Application Identity = Automatic in the GPO** (UTF-16 `GptTmpl.inf` under the GPO's `Machine\Microsoft\Windows NT\SecEdit\`):
@@ -605,8 +607,8 @@ Then add `[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C9
 **5. Link and choose the mode** (disable one link before enabling the other):
 ```powershell
 $ou = (Get-ADDomain).DomainControllersContainer
-New-GPLink -Name 'JSLC_AppLocker_ENFORCE_Domain_Controller' -Target $ou -LinkEnabled No
-New-GPLink -Name 'JSLC_AppLocker_AUDIT_Domain_Controller'   -Target $ou -LinkEnabled Yes
+New-GPLink -Name 'JMSC_AppLocker_ENFORCE_Domain_Controller' -Target $ou -LinkEnabled No
+New-GPLink -Name 'JMSC_AppLocker_AUDIT_Domain_Controller'   -Target $ou -LinkEnabled Yes
 Invoke-Command -ComputerName dc01 { gpupdate /target:computer /force; Start-Sleep 10; gpupdate /target:computer /force }
 ```
 **6. Check a DC:**
