@@ -4,8 +4,8 @@
 # Outputs\<profile> folder, so the classes never overwrite each other. The scripts refuse values that would widen the policy.
 @{
     # The two GPOs. Both are linked to every target OU; only one link is enabled at a time (3_AL_set_mode.ps1).
-    AuditGpoName      = 'JSLC_AppLocker_AUDIT_Domain_Controller'
-    EnforceGpoName    = 'JSLC_AppLocker_ENFORCE_Domain_Controller'
+    AuditGpoName      = 'JMSC_AppLocker_AUDIT_Domain_Controller'
+    EnforceGpoName    = 'JMSC_AppLocker_ENFORCE_Domain_Controller'
 
     # OUs (distinguished names) whose computers receive the policy. Empty = the Domain Controllers OU.
     # Example: @('OU=MECM Servers,OU=Servers,DC=contoso,DC=com')
